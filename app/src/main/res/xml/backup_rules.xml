@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WHY: these files hold third-party API keys. Auto-backup copies them to
+  Google's servers in a form the user can extract on a new device (or from an
+  .adb backup on older APIs), so they are excluded explicitly.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="app_settings_secure.xml" />
+    <exclude domain="sharedpref" path="app_settings.xml" />
+</full-backup-content>

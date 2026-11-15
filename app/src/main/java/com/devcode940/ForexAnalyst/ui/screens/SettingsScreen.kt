@@ -47,11 +47,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.devcode940.ForexAnalyst.data.settings.AppSettings
+import com.devcode940.ForexAnalyst.data.settings.IndicatorFormInput
+import com.devcode940.ForexAnalyst.data.settings.ThemeMode
 import com.devcode940.ForexAnalyst.ui.viewmodel.SettingsViewModel
 
 // ---------------------------------------------------------------------------
@@ -131,9 +134,9 @@ fun SettingsScreen(
                     .padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ThemeChip("System", AppSettings.THEME_SYSTEM, settings.themeMode) { viewModel.setThemeMode(it) }
-                ThemeChip("Light", AppSettings.THEME_LIGHT, settings.themeMode) { viewModel.setThemeMode(it) }
-                ThemeChip("Dark", AppSettings.THEME_DARK, settings.themeMode) { viewModel.setThemeMode(it) }
+                ThemeChip("System", ThemeMode.SYSTEM, settings.themeMode) { viewModel.setThemeMode(it) }
+                ThemeChip("Light", ThemeMode.LIGHT, settings.themeMode) { viewModel.setThemeMode(it) }
+                ThemeChip("Dark", ThemeMode.DARK, settings.themeMode) { viewModel.setThemeMode(it) }
             }
             Spacer(Modifier.height(24.dp))
         }
@@ -143,9 +146,9 @@ fun SettingsScreen(
 @Composable
 private fun ThemeChip(
     label: String,
-    value: String,
-    selected: String,
-    onSelect: (String) -> Unit
+    value: ThemeMode,
+    selected: ThemeMode,
+    onSelect: (ThemeMode) -> Unit
 ) {
     if (value == selected) {
         Button(onClick = { onSelect(value) }) { Text(label) }
@@ -215,16 +218,18 @@ fun IndicatorSettingsScreen(
     val message by viewModel.message.collectAsState()
     val snackbar = remember { SnackbarHostState() }
 
-    var rsi by remember(settings) { mutableStateOf(settings.rsiPeriod.toString()) }
-    var emaFast by remember(settings) { mutableStateOf(settings.emaFast.toString()) }
-    var emaMed by remember(settings) { mutableStateOf(settings.emaMedium.toString()) }
-    var emaSlow by remember(settings) { mutableStateOf(settings.emaSlow.toString()) }
-    var macdFast by remember(settings) { mutableStateOf(settings.macdFast.toString()) }
-    var macdSlow by remember(settings) { mutableStateOf(settings.macdSlow.toString()) }
-    var macdSignal by remember(settings) { mutableStateOf(settings.macdSignal.toString()) }
-    var atr by remember(settings) { mutableStateOf(settings.atrPeriod.toString()) }
-    var showEma by remember(settings) { mutableStateOf(settings.showEma) }
-    var showRsi by remember(settings) { mutableStateOf(settings.showRsi) }
+    // WHY: Key remember on each field's own value — remember(settings)
+    // reset every field whenever ANY setting changed, wiping in-progress edits.
+    var rsi by remember(settings.rsiPeriod) { mutableStateOf(settings.rsiPeriod.toString()) }
+    var emaFast by remember(settings.emaFast) { mutableStateOf(settings.emaFast.toString()) }
+    var emaMed by remember(settings.emaMedium) { mutableStateOf(settings.emaMedium.toString()) }
+    var emaSlow by remember(settings.emaSlow) { mutableStateOf(settings.emaSlow.toString()) }
+    var macdFast by remember(settings.macdFast) { mutableStateOf(settings.macdFast.toString()) }
+    var macdSlow by remember(settings.macdSlow) { mutableStateOf(settings.macdSlow.toString()) }
+    var macdSignal by remember(settings.macdSignal) { mutableStateOf(settings.macdSignal.toString()) }
+    var atr by remember(settings.atrPeriod) { mutableStateOf(settings.atrPeriod.toString()) }
+    var showEma by remember(settings.showEma) { mutableStateOf(settings.showEma) }
+    var showRsi by remember(settings.showRsi) { mutableStateOf(settings.showRsi) }
 
     SettingsMessageHost(snackbar, message) { viewModel.consumeMessage() }
 
@@ -265,17 +270,24 @@ fun IndicatorSettingsScreen(
 
             Button(
                 onClick = {
+                    // WHY: Pass the RAW text. The old call did
+                    // `toIntOrNull() ?: currentValue`, which silently threw
+                    // away a typo and then reported "Saved" — the user's edit
+                    // vanished with no feedback. Validation now happens in
+                    // IndicatorFormValidator, which names the offending field.
                     viewModel.saveIndicators(
-                        rsiPeriod = rsi.toIntOrNull() ?: settings.rsiPeriod,
-                        emaFast = emaFast.toIntOrNull() ?: settings.emaFast,
-                        emaMedium = emaMed.toIntOrNull() ?: settings.emaMedium,
-                        emaSlow = emaSlow.toIntOrNull() ?: settings.emaSlow,
-                        macdFast = macdFast.toIntOrNull() ?: settings.macdFast,
-                        macdSlow = macdSlow.toIntOrNull() ?: settings.macdSlow,
-                        macdSignal = macdSignal.toIntOrNull() ?: settings.macdSignal,
-                        atrPeriod = atr.toIntOrNull() ?: settings.atrPeriod,
-                        showEma = showEma,
-                        showRsi = showRsi
+                        IndicatorFormInput(
+                            rsiPeriod = rsi,
+                            emaFast = emaFast,
+                            emaMedium = emaMed,
+                            emaSlow = emaSlow,
+                            macdFast = macdFast,
+                            macdSlow = macdSlow,
+                            macdSignal = macdSignal,
+                            atrPeriod = atr,
+                            showEma = showEma,
+                            showRsi = showRsi
+                        )
                     )
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -330,10 +342,11 @@ fun ApiKeysScreen(
     val message by viewModel.message.collectAsState()
     val snackbar = remember { SnackbarHostState() }
 
-    var fcs by remember(settings) { mutableStateOf(settings.fcsApiKey) }
-    var alpha by remember(settings) { mutableStateOf(settings.alphaVantageApiKey) }
-    var openRouter by remember(settings) { mutableStateOf(settings.openRouterApiKey) }
-    var model by remember(settings) { mutableStateOf(settings.aiModel) }
+    // WHY: Key remember on each field's own value (see IndicatorSettingsScreen).
+    var fcs by remember(settings.fcsApiKey) { mutableStateOf(settings.fcsApiKey) }
+    var alpha by remember(settings.alphaVantageApiKey) { mutableStateOf(settings.alphaVantageApiKey) }
+    var openRouter by remember(settings.openRouterApiKey) { mutableStateOf(settings.openRouterApiKey) }
+    var model by remember(settings.aiModel) { mutableStateOf(settings.aiModel) }
     var reveal by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
 
@@ -351,8 +364,12 @@ fun ApiKeysScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // WHY: state the actual guarantee. "Stored on this device" was
+            // not true before (plaintext prefs + included in auto-backup);
+            // users decide whether to paste a paid API key based on this copy.
             Text(
-                "Keys are stored on this device only. Without them the app runs on simulated market data.",
+                "Keys are encrypted with the Android Keystore and excluded from backups, so they never " +
+                    "leave this device. Without them the app runs on simulated market data.",
                 style = MaterialTheme.typography.bodySmall
             )
 
@@ -402,6 +419,14 @@ fun ApiKeysScreen(
     }
 }
 
+/**
+ * Masked single-line field for a credential.
+ *
+ * @param label field caption.
+ * @param value current secret text.
+ * @param reveal when false the value is rendered as a password.
+ * @param onChange invoked with the edited text.
+ */
 @Composable
 private fun SecretField(
     label: String,
@@ -419,6 +444,15 @@ private fun SecretField(
         } else {
             PasswordVisualTransformation()
         },
+        // WHY: API keys are opaque tokens — autocorrect/capitalization/
+        // suggestions silently corrupt them, and a "smart" keyboard that
+        // capitalizes the first letter produces a key that fails auth with no
+        // obvious cause.
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Password,
+            autoCorrect = false,
+            imeAction = ImeAction.Done
+        ),
         modifier = Modifier.fillMaxWidth()
     )
 }

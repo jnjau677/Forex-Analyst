@@ -14,7 +14,11 @@ import androidx.room.TypeConverters
         HistoricalCandleEntity::class
     ],
     version = 1,
-    exportSchema = false
+    // WHY: exportSchema = true writes schemas/ForexDatabase/1.json into the
+    // repo. That snapshot is what MigrationTestHelper diffs against when you
+    // bump the version — the only reliable way to prove a migration does not
+    // destroy user data.
+    exportSchema = true
 )
 @TypeConverters(Converters::class)
 abstract class ForexDatabase : RoomDatabase() {
@@ -35,8 +39,10 @@ abstract class ForexDatabase : RoomDatabase() {
                     ForexDatabase::class.java,
                     "forex_analyst.db"
                 )
-                    // WHY: Dev-stage schema changes should not crash the app on upgrade.
-                    .fallbackToDestructiveMigration()
+                    // WHY: No fallbackToDestructiveMigration() in production —
+                    // silently wiping the user's watchlist/signals/alerts on
+                    // upgrade is data loss. Add explicit Migration objects
+                    // before bumping [version] instead.
                     .build()
                     .also { INSTANCE = it }
             }

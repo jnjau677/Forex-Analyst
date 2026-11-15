@@ -1,6 +1,7 @@
 package com.devcode940.ForexAnalyst
 
 import android.app.Application
+import android.content.Context
 import android.util.Log
 import com.devcode940.ForexAnalyst.data.db.ForexDatabase
 import com.devcode940.ForexAnalyst.data.db.WatchlistItemEntity
@@ -28,16 +29,29 @@ class ForexApplication : Application() {
     private fun seedDefaultWatchlist() {
         appScope.launch {
             runCatching {
-                val dao = database.watchlistDao()
-                if (dao.getAllSymbols().isEmpty()) {
+                // WHY: A "seeded" flag (not isEmpty) — if the user deletes
+                // every watchlist item, the old isEmpty check resurrected
+                // the defaults on next launch.
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                if (!prefs.getBoolean(KEY_SEEDED, false)) {
                     val now = Instant.now()
-                    PairCatalog.getDefaultWatchlist().forEach { pair ->
-                        dao.insertItem(WatchlistItemEntity(pair.value, now))
-                    }
+                    // WHY: One batch insert instead of N single inserts.
+                    database.watchlistDao().insertAll(
+                        PairCatalog.getDefaultWatchlist().map { pair ->
+                            WatchlistItemEntity(pair.value, now)
+                        }
+                    )
+                    prefs.edit().putBoolean(KEY_SEEDED, true).apply()
                 }
             }.onFailure {
-                Log.e("ForexApplication", "Watchlist seeding failed", it)
+                Log.e(TAG, "Watchlist seeding failed", it)
             }
         }
+    }
+
+    companion object {
+        private const val TAG = "ForexApplication"
+        private const val PREFS_NAME = "forex_app_prefs"
+        private const val KEY_SEEDED = "watchlist_seeded"
     }
 }

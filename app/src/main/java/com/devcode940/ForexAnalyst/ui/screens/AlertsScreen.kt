@@ -1,5 +1,6 @@
 package com.devcode940.ForexAnalyst.ui.screens
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,6 +18,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +44,7 @@ import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
 import com.devcode940.ForexAnalyst.ui.viewmodel.ForexViewModel
 import java.time.Instant
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,7 +96,9 @@ fun AlertsScreen(
                 items(alerts) { alert ->
                     ListItem(
                         headlineContent = {
-                            Text("${alert.conditionType.name} ${"%.5f".format(alert.targetValue)}")
+                            // WHY: Locale.US — "%.5f" uses the default locale
+                            // (comma vs dot) and must render identically everywhere.
+                            Text("${alert.conditionType.name} ${String.format(Locale.US, "%.5f", alert.targetValue)}")
                         },
                         supportingContent = {
                             if (alert.note.isNotBlank()) Text(alert.note)
@@ -121,6 +126,13 @@ fun AlertsScreen(
     if (showCreateDialog) {
         var targetValue by remember { mutableStateOf("") }
         var note by remember { mutableStateOf("") }
+        // WHY: the dialog used to hardcode PRICE_ABOVE, so three of the four
+        // conditions the domain model supports were unreachable from the UI.
+        var condition by remember { mutableStateOf(AlertConditionType.PRICE_ABOVE) }
+
+        // WHY: parse once, reuse for the enabled state, the inline hint and
+        // the save action — three separate parses could disagree with each other.
+        val parsedTarget = targetValue.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
 
         AlertDialog(
             onDismissRequest = { showCreateDialog = false },
@@ -129,16 +141,45 @@ fun AlertsScreen(
                 Column {
                     Text("Pair: ${selectedPair.value}")
                     Spacer(Modifier.height(8.dp))
+                    Text("Trigger when", style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    // WHY: two rows instead of a FlowRow — FlowRow is still
+                    // experimental in this Compose BOM, and an explicit layout
+                    // cannot silently reflow into an unreadable dialog.
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AlertConditionChip(AlertConditionType.PRICE_ABOVE, condition) { condition = it }
+                        AlertConditionChip(AlertConditionType.PRICE_BELOW, condition) { condition = it }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AlertConditionChip(AlertConditionType.RSI_ABOVE, condition) { condition = it }
+                        AlertConditionChip(AlertConditionType.RSI_BELOW, condition) { condition = it }
+                    }
+                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = targetValue,
                         onValueChange = { targetValue = it },
-                        label = { Text("Target value") },
-                        singleLine = true
+                        // WHY: the label tells the user which unit to type —
+                        // an RSI threshold is 0..100, a price is not.
+                        label = { Text(condition.targetLabel()) },
+                        singleLine = true,
+                        isError = targetValue.isNotBlank() && parsedTarget == null,
+                        // WHY: explain a disabled button. Silently disabling
+                        // "Create" leaves the user guessing what is wrong.
+                        supportingText = {
+                            if (targetValue.isNotBlank() && parsedTarget == null) {
+                                Text("Enter a number, for example ${condition.exampleValue()}")
+                            } else {
+                                Text(condition.hint())
+                            }
+                        }
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = note,
-                        onValueChange = { note = it },
+                        // WHY: Cap at the model's MAX_NOTE_LENGTH so the
+                        // field can never produce a value the model rejects.
+                        onValueChange = { note = it.take(CustomAlert.MAX_NOTE_LENGTH) },
                         label = { Text("Note (optional)") },
                         singleLine = true
                     )
@@ -147,24 +188,26 @@ fun AlertsScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val value = targetValue.toDoubleOrNull()
+                        // WHY: isFinite() — "NaN".toDoubleOrNull() succeeds,
+                        // and a NaN alert can never trigger.
+                        val value = parsedTarget
                         if (value != null) {
                             viewModel.saveAlert(
                                 CustomAlert(
                                     id = AlertId.generate(),
                                     pairSymbol = selectedPair,
-                                    conditionType = AlertConditionType.PRICE_ABOVE,
+                                    conditionType = condition,
                                     targetValue = value,
                                     isTriggered = false,
                                     isActive = true,
-                                    note = note,
+                                    note = note.trim(),
                                     createdAt = Instant.now()
                                 )
                             )
                             showCreateDialog = false
                         }
                     },
-                    enabled = targetValue.toDoubleOrNull() != null
+                    enabled = parsedTarget != null
                 ) { Text("Create") }
             },
             dismissButton = {
@@ -172,4 +215,51 @@ fun AlertsScreen(
             }
         )
     }
+}
+/**
+ * Selectable chip for one [AlertConditionType].
+ *
+ * WHY: an exhaustive `when` supplies the label, so adding a condition to the
+ * enum is a compile error here rather than a missing button in the UI.
+ */
+@Composable
+private fun AlertConditionChip(
+    condition: AlertConditionType,
+    selected: AlertConditionType,
+    onSelect: (AlertConditionType) -> Unit
+) {
+    FilterChip(
+        selected = condition == selected,
+        onClick = { onSelect(condition) },
+        label = { Text(condition.shortLabel()) }
+    )
+}
+
+/** Short chip label for a condition. */
+private fun AlertConditionType.shortLabel(): String = when (this) {
+    AlertConditionType.PRICE_ABOVE -> "Price above"
+    AlertConditionType.PRICE_BELOW -> "Price below"
+    AlertConditionType.RSI_ABOVE -> "RSI above"
+    AlertConditionType.RSI_BELOW -> "RSI below"
+}
+
+/** Field label describing the expected unit. */
+private fun AlertConditionType.targetLabel(): String = when (this) {
+    AlertConditionType.PRICE_ABOVE, AlertConditionType.PRICE_BELOW -> "Target price"
+    AlertConditionType.RSI_ABOVE, AlertConditionType.RSI_BELOW -> "Target RSI (0-100)"
+}
+
+/** Example value shown when the current input cannot be parsed. */
+private fun AlertConditionType.exampleValue(): String = when (this) {
+    AlertConditionType.PRICE_ABOVE, AlertConditionType.PRICE_BELOW -> "1.0850"
+    AlertConditionType.RSI_ABOVE, AlertConditionType.RSI_BELOW -> "70"
+}
+
+/** WHY: states what the alert will do — an alert whose meaning is unclear is
+ * an alert the user does not trust. */
+private fun AlertConditionType.hint(): String = when (this) {
+    AlertConditionType.PRICE_ABOVE -> "Fires once the ask price reaches or exceeds this level."
+    AlertConditionType.PRICE_BELOW -> "Fires once the bid price reaches or falls below this level."
+    AlertConditionType.RSI_ABOVE -> "Fires when RSI(14) rises above this level (overbought)."
+    AlertConditionType.RSI_BELOW -> "Fires when RSI(14) drops below this level (oversold)."
 }

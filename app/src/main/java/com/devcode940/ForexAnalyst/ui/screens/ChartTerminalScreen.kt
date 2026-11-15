@@ -38,6 +38,9 @@ import com.devcode940.ForexAnalyst.ui.components.CrosshairData
 import com.devcode940.ForexAnalyst.ui.theme.BearishRed
 import com.devcode940.ForexAnalyst.ui.theme.BullishGreen
 import com.devcode940.ForexAnalyst.ui.viewmodel.ForexViewModel
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,13 +49,14 @@ fun ChartTerminalScreen(
     onNavigateToWatchlist: () -> Unit,
     onNavigateToAlerts: () -> Unit,
     onNavigateToSettings: () -> Unit,
-    onNavigateToAiAnalyst: () -> Unit,
-    onRequestNotificationPermission: () -> Unit
+    onNavigateToAiAnalyst: () -> Unit
 ) {
     val selectedPair by viewModel.selectedPair.collectAsState()
     val candles by viewModel.candles.collectAsState()
     val indicators by viewModel.indicators.collectAsState()
     val selectedTimeframe by viewModel.selectedTimeframe.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
+    val appSettings by viewModel.appSettings.collectAsState()
     var crosshairData by remember { mutableStateOf<CrosshairData?>(null) }
 
     Scaffold(
@@ -102,9 +106,25 @@ fun ChartTerminalScreen(
                 CrosshairTooltip(data = data)
             }
 
+            // WHY: Show load failures instead of a silent empty chart —
+            // the message is actionable (tells the user what to do next).
+            val error = errorMessage
+            if (error != null) {
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
             CandlestickChartCanvas(
                 candles = candles,
                 indicators = indicators,
+                // WHY: the EMA/RSI toggles in Settings were persisted but never
+                // reached the chart, so both switches appeared broken.
+                showEma = appSettings.showEma,
+                showRsi = appSettings.showRsi,
                 onCrosshairUpdate = { crosshairData = it },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -116,6 +136,11 @@ fun ChartTerminalScreen(
     }
 }
 
+// WHY: built once (formatter creation is expensive) and zoned to the device
+// so a candle reads in the trader's local time, not UTC.
+private val TOOLTIP_TIME_FORMAT: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MMM d, HH:mm", Locale.US).withZone(ZoneId.systemDefault())
+
 @Composable
 private fun CrosshairTooltip(data: CrosshairData) {
     Surface(
@@ -125,17 +150,25 @@ private fun CrosshairTooltip(data: CrosshairData) {
     ) {
         Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
             Text(
-                text = "Price: ${"%.5f".format(data.price)}",
+                text = "Price: ${String.format(Locale.US, "%.5f", data.price)}",
                 style = MaterialTheme.typography.labelSmall
             )
             val c = data.candle
             if (c != null) {
+                // WHY: show WHICH candle the numbers belong to — the old
+                // tooltip listed OHLC with no time, so the user could not tell
+                // whether they were reading today's bar or last week's.
                 Text(
-                    text = "O ${"%.5f".format(c.open)}  H ${"%.5f".format(c.high)}",
+                    text = TOOLTIP_TIME_FORMAT.format(c.time),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "O ${String.format(Locale.US, "%.5f", c.open)}  H ${String.format(Locale.US, "%.5f", c.high)}",
                     style = MaterialTheme.typography.labelSmall
                 )
                 Text(
-                    text = "L ${"%.5f".format(c.low)}  C ${"%.5f".format(c.close)}",
+                    text = "L ${String.format(Locale.US, "%.5f", c.low)}  C ${String.format(Locale.US, "%.5f", c.close)}",
                     style = MaterialTheme.typography.labelSmall
                 )
             }
@@ -148,7 +181,9 @@ private fun TimeframeSelector(
     selected: Timeframe,
     onSelected: (Timeframe) -> Unit
 ) {
-    val timeframes = listOf("M5", "M15", "H1", "H4", "D1")
+    // WHY: read the supported set from the domain type instead of a hardcoded
+    // UI list — the two used to disagree (M1/W1 were valid but unselectable).
+    val timeframes = Timeframe.ORDERED
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -169,7 +204,11 @@ private fun TimeframeSelector(
 @Composable
 private fun SignalSummaryBar(viewModel: ForexViewModel) {
     val signals by viewModel.signals.collectAsState()
-    val latest = signals.firstOrNull()
+    val selectedTimeframe by viewModel.selectedTimeframe.collectAsState()
+    // WHY: the DAO stream is filtered by pair only; without this filter the
+    // summary bar advertises an H1 signal while the chart shows D1 candles,
+    // which reads as a wrong price level to the user.
+    val latest = signals.firstOrNull { it.timeframe == selectedTimeframe }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -203,23 +242,23 @@ private fun SignalSummaryBar(viewModel: ForexViewModel) {
                         color = if (latest.signalType.name == "BUY") BullishGreen else BearishRed
                     )
                     Text(
-                        text = "Entry: ${"%.5f".format(latest.entryPrice)}",
+                        text = "Entry: ${String.format(Locale.US, "%.5f", latest.entryPrice)}",
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = "SL: ${"%.5f".format(latest.stopLoss)}",
+                        text = "SL: ${String.format(Locale.US, "%.5f", latest.stopLoss)}",
                         style = MaterialTheme.typography.labelSmall,
                         color = BearishRed
                     )
                     Text(
-                        text = "TP: ${"%.5f".format(latest.takeProfit1)}",
+                        text = "TP: ${String.format(Locale.US, "%.5f", latest.takeProfit1)}",
                         style = MaterialTheme.typography.labelSmall,
                         color = BullishGreen
                     )
                     Text(
-                        text = "R:R ${"%.2f".format(latest.riskRewardRatio)} · ${(latest.confidenceScore * 100).toInt()}%",
+                        text = "R:R ${String.format(Locale.US, "%.2f", latest.riskRewardRatio)} · ${(latest.confidenceScore * 100).toInt()}%",
                         style = MaterialTheme.typography.labelSmall
                     )
                 }

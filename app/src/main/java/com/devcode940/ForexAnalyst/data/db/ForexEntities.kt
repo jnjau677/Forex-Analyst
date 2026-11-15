@@ -5,7 +5,7 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import java.time.Instant
 
-// WHY: Room + KAPT cannot handle Kotlin value classes directly. 
+// WHY: Room + KAPT cannot handle Kotlin value classes directly.
 // We use String here and convert to value classes in the Repository.
 
 @Entity(tableName = "watchlist_items", indices = [Index(value = ["addedAt"])])
@@ -14,11 +14,20 @@ data class WatchlistItemEntity(
     val addedAt: Instant
 )
 
-@Entity(tableName = "saved_signals", indices = [
-    Index(value = ["pairSymbol"]), Index(value = ["timestamp"]),
-    Index(value = ["pairSymbol", "timestamp"]), Index(value = ["isBookmarked"]),
-    Index(value = ["fingerprint"], unique = true)
-])
+/**
+ * WHY: Only the composite (pairSymbol, timestamp) index is kept — the old
+ * single-column indexes on pairSymbol and timestamp were redundant (the
+ * composite's leftmost column already serves pairSymbol lookups) and cost
+ * extra write time + storage on every insert.
+ */
+@Entity(
+    tableName = "saved_signals",
+    indices = [
+        Index(value = ["pairSymbol", "timestamp"]),
+        Index(value = ["isBookmarked"]),
+        Index(value = ["fingerprint"], unique = true)
+    ]
+)
 data class SavedSignalEntity(
     @PrimaryKey val id: String,
     val pairSymbol: String,
@@ -48,8 +57,12 @@ data class CustomAlertEntity(
     val createdAt: Instant
 )
 
-@Entity(tableName = "historical_candles", primaryKeys = ["symbol", "timeframe", "timestamp"],
-    indices = [Index(value = ["symbol", "timeframe", "timestamp"])])
+/**
+ * WHY: The composite primary key already creates an index on
+ * (symbol, timeframe, timestamp) — the old explicit index on the same
+ * columns was pure overhead.
+ */
+@Entity(tableName = "historical_candles", primaryKeys = ["symbol", "timeframe", "timestamp"])
 data class HistoricalCandleEntity(
     val symbol: String,
     val timeframe: String,

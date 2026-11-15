@@ -1,6 +1,9 @@
 package com.devcode940.ForexAnalyst.ui.navigation
 
+import android.app.Application
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -22,6 +25,13 @@ import com.devcode940.ForexAnalyst.ui.screens.WatchlistScreen
 import com.devcode940.ForexAnalyst.ui.viewmodel.ForexViewModel
 import com.devcode940.ForexAnalyst.ui.viewmodel.SettingsViewModel
 
+/**
+ * Navigation graph route templates.
+ *
+ * WHY: route strings live in one typed place — a typo in an inline
+ * `navigate("setings")` fails silently at runtime with an IllegalArgumentException
+ * from the NavHost, which is far harder to trace than a missing constant.
+ */
 object Routes {
     const val CHART_DEFAULT = "chart/default"
     const val CHART = "chart/{pairSymbol}"
@@ -36,9 +46,22 @@ object Routes {
     const val SETTINGS_ABOUT = "settings/about"
 }
 
+/**
+ * Application navigation host.
+ *
+ * WHY: ViewModels are created here (activity-scoped) and passed down, so every
+ * destination shares one [ForexViewModel] instance and one source of truth for
+ * the selected pair — navigating to the chart from the watchlist must not reset
+ * the chart's state.
+ *
+ * @param forexViewModel market-data ViewModel shared by all trading screens.
+ * @param settingsViewModel preferences ViewModel shared by all settings screens.
+ */
 @Composable
 fun ForexNavHost(
-    forexViewModel: ForexViewModel = viewModel(),
+    forexViewModel: ForexViewModel = viewModel(
+        factory = ForexViewModel.Factory(LocalContext.current.applicationContext as Application)
+    ),
     settingsViewModel: SettingsViewModel = viewModel()
 ) {
     val nav = rememberNavController()
@@ -53,8 +76,13 @@ fun ForexNavHost(
             route = Routes.CHART,
             arguments = listOf(navArgument("pairSymbol") { type = NavType.StringType })
         ) { entry ->
-            val symbol = entry.arguments?.getString("pairSymbol") ?: "EURUSD"
-            forexViewModel.selectPair(PairSymbol(symbol))
+            val symbol = entry.arguments?.getString("pairSymbol")?.takeIf { it.isNotBlank() } ?: "EURUSD"
+            // WHY: Side effects belong in LaunchedEffect, not composition —
+            // composition can run multiple times and must be idempotent.
+            // PairSymbol.of normalizes casing/whitespace from the nav arg.
+            LaunchedEffect(symbol) {
+                forexViewModel.selectPair(PairSymbol.of(symbol))
+            }
             ChartRoute(forexViewModel, nav)
         }
 
@@ -78,7 +106,7 @@ fun ForexNavHost(
         }
 
         composable(Routes.AI_ANALYST) {
-            AiAnalystScreen(viewModel = forexViewModel, onBack = { nav.popBackStack() })
+            AiAnalystScreen(onBack = { nav.popBackStack() })
         }
 
         composable(Routes.SETTINGS) {
@@ -117,7 +145,6 @@ private fun ChartRoute(vm: ForexViewModel, nav: NavHostController) {
         onNavigateToWatchlist = { nav.navigate(Routes.WATCHLIST) },
         onNavigateToAlerts = { nav.navigate(Routes.ALERTS) },
         onNavigateToSettings = { nav.navigate(Routes.SETTINGS) },
-        onNavigateToAiAnalyst = { nav.navigate(Routes.AI_ANALYST) },
-        onRequestNotificationPermission = {}
+        onNavigateToAiAnalyst = { nav.navigate(Routes.AI_ANALYST) }
     )
 }

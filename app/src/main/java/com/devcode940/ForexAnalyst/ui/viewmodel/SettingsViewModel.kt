@@ -3,7 +3,11 @@ package com.devcode940.ForexAnalyst.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.devcode940.ForexAnalyst.data.settings.AppSettings
+import com.devcode940.ForexAnalyst.data.settings.IndicatorFormInput
+import com.devcode940.ForexAnalyst.data.settings.IndicatorFormResult
+import com.devcode940.ForexAnalyst.data.settings.IndicatorFormValidator
 import com.devcode940.ForexAnalyst.data.settings.SettingsRepository
+import com.devcode940.ForexAnalyst.data.settings.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,42 +25,38 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _message.value = null
     }
 
-    fun saveIndicators(
-        rsiPeriod: Int,
-        emaFast: Int,
-        emaMedium: Int,
-        emaSlow: Int,
-        macdFast: Int,
-        macdSlow: Int,
-        macdSignal: Int,
-        atrPeriod: Int,
-        showEma: Boolean,
-        showRsi: Boolean
-    ) {
-        if (macdFast >= macdSlow) {
-            _message.value = "MACD fast period must be smaller than slow period."
-            return
+    /**
+     * Validates and persists the indicator form.
+     *
+     * WHY: The old version coerced values silently and validated in the wrong
+     * order (coerce AFTER validate), so an out-of-range entry could be stored
+     * while the user was told everything was fine. Validation is delegated to
+     * [IndicatorFormValidator] — a pure object that is unit-tested on the JVM.
+     */
+    fun saveIndicators(input: IndicatorFormInput) {
+        when (val result = IndicatorFormValidator.validate(input)) {
+            is IndicatorFormResult.Valid -> {
+                val values = result.values
+                repository.update { current ->
+                    current.copy(
+                        rsiPeriod = values.rsiPeriod,
+                        emaFast = values.emaFast,
+                        emaMedium = values.emaMedium,
+                        emaSlow = values.emaSlow,
+                        macdFast = values.macdFast,
+                        macdSlow = values.macdSlow,
+                        macdSignal = values.macdSignal,
+                        atrPeriod = values.atrPeriod,
+                        showEma = values.showEma,
+                        showRsi = values.showRsi
+                    )
+                }
+                _message.value = "Indicator settings saved."
+            }
+            // WHY: Show the validator's actionable message (field + accepted
+            // range + what was typed) instead of a generic "Invalid input".
+            is IndicatorFormResult.Invalid -> _message.value = result.userMessage
         }
-        if (emaFast >= emaMedium || emaMedium >= emaSlow) {
-            _message.value = "EMA periods must increase: fast < medium < slow."
-            return
-        }
-
-        repository.update { current ->
-            current.copy(
-                rsiPeriod = rsiPeriod.coerceIn(2, 100),
-                emaFast = emaFast.coerceIn(2, 400),
-                emaMedium = emaMedium.coerceIn(2, 400),
-                emaSlow = emaSlow.coerceIn(2, 400),
-                macdFast = macdFast.coerceIn(2, 100),
-                macdSlow = macdSlow.coerceIn(3, 200),
-                macdSignal = macdSignal.coerceIn(2, 100),
-                atrPeriod = atrPeriod.coerceIn(2, 100),
-                showEma = showEma,
-                showRsi = showRsi
-            )
-        }
-        _message.value = "Indicator settings saved."
     }
 
     fun resetIndicators() {
@@ -101,7 +101,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         repository.update { it.copy(soundEnabled = enabled) }
     }
 
-    fun setThemeMode(mode: String) {
+    /** WHY: ThemeMode enum (not String) — invalid states are unrepresentable. */
+    fun setThemeMode(mode: ThemeMode) {
         repository.update { it.copy(themeMode = mode) }
     }
 }

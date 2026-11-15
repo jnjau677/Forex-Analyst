@@ -9,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -36,11 +37,40 @@ private val BearishColor = Color(0xFFEF5350)
 private val Ema20Color = Color(0xFFFFEB3B)
 private val Ema50Color = Color(0xFF2196F3)
 private val Ema200Color = Color(0xFFE91E63)
+private val RsiColor = Color(0xFFAB47BC)
+private val RsiGuideColor = Color(0xFF9E9E9E)
 
+/**
+ * Fraction of the canvas height reserved for the RSI sub-panel.
+ *
+ * WHY: a fixed fraction (not a fixed dp value) keeps the price area usable on
+ * small screens and on tablets without a second layout pass.
+ */
+private const val RSI_PANEL_FRACTION = 0.22f
+
+/** RSI is defined on 0..100 — these are the conventional thresholds. */
+private const val RSI_OVERSOLD_LEVEL = 30.0
+private const val RSI_OVERBOUGHT_LEVEL = 70.0
+
+/**
+ * Interactive candlestick chart with EMA overlays and an optional RSI sub-panel.
+ *
+ * WHY [showEma]/[showRsi] are parameters: the Settings screen persisted both
+ * toggles but nothing consumed them, so switching RSI off changed nothing.
+ *
+ * @param candles ascending OHLC series to render.
+ * @param indicators index-aligned overlay series (see [IndicatorState]).
+ * @param showEma draw the EMA overlays.
+ * @param showRsi reserve a sub-panel and draw the RSI line with 30/70 guides.
+ * @param onCrosshairUpdate invoked with the tapped price/candle, or null on reset.
+ * @param modifier layout modifier.
+ */
 @Composable
 fun CandlestickChartCanvas(
     candles: List<CandleStick>,
     indicators: IndicatorState,
+    showEma: Boolean = true,
+    showRsi: Boolean = false,
     onCrosshairUpdate: (CrosshairData?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -48,10 +78,18 @@ fun CandlestickChartCanvas(
     var offsetX by remember { mutableFloatStateOf(0f) }
     var crosshairPosition by remember { mutableStateOf<Offset?>(null) }
 
+    // WHY: rememberUpdatedState so the pointer-input coroutines (keyed on
+    // candles.size, therefore not restarted when a toggle changes) always read
+    // the CURRENT preferences instead of a stale captured value.
+    val currentShowEma by rememberUpdatedState(showEma)
+    val currentShowRsi by rememberUpdatedState(showRsi)
+    val currentRsi by rememberUpdatedState(indicators.rsi)
+
     // WHY: Reusing Path objects avoids allocating on every frame during pan/zoom.
     val bodyPath = remember { Path() }
     val wickPath = remember { Path() }
     val indicatorPath = remember { Path() }
+    val rsiPath = remember { Path() }
 
     Canvas(
         modifier = modifier
@@ -68,10 +106,19 @@ fun CandlestickChartCanvas(
                         crosshairPosition = offset
                         if (candles.isNotEmpty()) {
                             // WHY: PointerInputScope.size is IntSize; convert to Size explicitly.
-                            val canvas = Size(size.width.toFloat(), size.height.toFloat())
+                            // WHY: identical geometry to the draw pass — if the
+                            // RSI panel is visible the price area is shorter, and
+                            // mapping the tap against the full height would report
+                            // the wrong price in the tooltip.
+                            val panel = rsiPanelHeight(
+                                size.height.toFloat(),
+                                currentShowRsi,
+                                currentRsi
+                            )
+                            val canvas = Size(size.width.toFloat(), size.height.toFloat() - panel)
                             val cs = ChartCoordinateSystem(canvas, candles, scale, offsetX)
                             val time = cs.xToTime(offset.x)
-                            val nearest = candles.minByOrNull { abs(it.time - time) }
+                            val nearest = candles.minByOrNull { abs(it.timeMillis - time) }
                             onCrosshairUpdate(
                                 CrosshairData(cs.yToPrice(offset.y), time, nearest)
                             )
@@ -88,21 +135,58 @@ fun CandlestickChartCanvas(
     ) {
         if (candles.isEmpty()) return@Canvas
 
-        val cs = ChartCoordinateSystem(size, candles, scale, offsetX)
+        // WHY: reserve the RSI band first, then build the price coordinate
+        // system on the REMAINING height — otherwise candles would be drawn
+        // underneath the sub-panel.
+        val panelHeight = rsiPanelHeight(size.height, currentShowRsi, indicators.rsi)
+        val priceArea = Size(size.width, size.height - panelHeight)
+        val cs = ChartCoordinateSystem(priceArea, candles, scale, offsetX)
         val range = cs.calculateVisibleRange()
         val from = range.first.coerceIn(0, candles.size)
         val to = range.second.coerceIn(from, candles.size)
         val visible = candles.subList(from, to)
 
-        drawGrid()
-        drawIndicators(indicators, candles, from, to, cs, indicatorPath)
+        drawGrid(priceArea.height)
+        if (currentShowEma) {
+            drawIndicators(indicators, candles, from, to, cs, indicatorPath)
+        }
         drawCandles(visible, cs, bodyPath, wickPath)
+        if (panelHeight > 0f) {
+            val rsi = indicators.rsi
+            if (rsi != null) {
+                drawRsiPanel(
+                    rsi = rsi,
+                    allCandles = candles,
+                    from = from,
+                    to = to,
+                    cs = cs,
+                    top = priceArea.height,
+                    height = panelHeight,
+                    path = rsiPath
+                )
+            }
+        }
 
         val cross = crosshairPosition
         if (cross != null) {
             drawCrosshair(cross)
         }
     }
+}
+
+/**
+ * Height of the RSI sub-panel in pixels.
+ *
+ * WHY: one shared calculation for the draw pass and the tap pass — duplicated
+ * geometry is how a tooltip ends up reporting the wrong price.
+ * Returns 0 when the panel is disabled or has no data yet (leading nulls).
+ */
+private fun rsiPanelHeight(canvasHeight: Float, showRsi: Boolean, rsi: List<Double?>?): Float {
+    if (!showRsi || rsi == null) return 0f
+    // WHY: do not reserve space for a panel that cannot draw anything (e.g. a
+    // series shorter than the RSI period is all nulls).
+    if (rsi.none { it != null }) return 0f
+    return canvasHeight * RSI_PANEL_FRACTION
 }
 
 /**
@@ -125,8 +209,8 @@ class ChartCoordinateSystem(
         val padding = (max - min) * 0.05
         minPrice = min - padding
         maxPrice = max + padding
-        startTime = candles.firstOrNull()?.time ?: 0L
-        endTime = candles.lastOrNull()?.time ?: 1L
+        startTime = candles.firstOrNull()?.timeMillis ?: 0L
+        endTime = candles.lastOrNull()?.timeMillis ?: 1L
     }
 
     fun priceToY(price: Double): Float {
@@ -164,9 +248,9 @@ class ChartCoordinateSystem(
         val lo = minOf(t0, t1)
         val hi = maxOf(t0, t1)
 
-        var startIndex = candles.indexOfFirst { it.time >= lo }
+        var startIndex = candles.indexOfFirst { it.timeMillis >= lo }
         if (startIndex < 0) startIndex = 0
-        var endIndex = candles.indexOfLast { it.time <= hi }
+        var endIndex = candles.indexOfLast { it.timeMillis <= hi }
         if (endIndex < 0) endIndex = candles.size - 1
 
         val from = (startIndex - 2).coerceAtLeast(0)
@@ -184,10 +268,15 @@ class ChartCoordinateSystem(
     }
 }
 
-private fun DrawScope.drawGrid() {
+/**
+ * Horizontal price grid.
+ *
+ * @param height height of the PRICE area (excludes the RSI sub-panel).
+ */
+private fun DrawScope.drawGrid(height: Float) {
     val gridColor = Color.Gray.copy(alpha = 0.2f)
     for (i in 0..4) {
-        val y = size.height * i / 4f
+        val y = height * i / 4f
         drawLine(
             color = gridColor,
             start = Offset(0f, y),
@@ -206,7 +295,7 @@ private fun DrawScope.drawCandles(
     val width = cs.candleWidth()
 
     for (candle in candles) {
-        val x = cs.timeToX(candle.time)
+        val x = cs.timeToX(candle.timeMillis)
         if (x < -width || x > size.width + width) continue
 
         val openY = cs.priceToY(candle.open)
@@ -266,7 +355,7 @@ private fun DrawScope.drawIndicatorLine(
     for (index in from until to) {
         val value = values.getOrNull(index) ?: continue
         val candle = allCandles.getOrNull(index) ?: continue
-        val x = cs.timeToX(candle.time)
+        val x = cs.timeToX(candle.timeMillis)
         val y = cs.priceToY(value)
 
         if (!started) {
@@ -279,6 +368,61 @@ private fun DrawScope.drawIndicatorLine(
 
     if (started) {
         drawPath(path = path, color = color, style = Stroke(width = 2.dp.toPx()))
+    }
+}
+
+/**
+ * Draws the RSI sub-panel: separator, 30/70 guides and the RSI line.
+ *
+ * WHY a sub-panel instead of an overlay: RSI is bounded 0..100 while prices are
+ * unbounded — plotting them on one axis makes one of the two unreadable.
+ * X coordinates come from the SAME [ChartCoordinateSystem] as the candles, so
+ * the RSI value always sits under its own bar.
+ */
+private fun DrawScope.drawRsiPanel(
+    rsi: List<Double?>,
+    allCandles: List<CandleStick>,
+    from: Int,
+    to: Int,
+    cs: ChartCoordinateSystem,
+    top: Float,
+    height: Float,
+    path: Path
+) {
+    fun yFor(value: Double): Float = top + height * (1f - (value / 100.0).toFloat())
+
+    drawLine(
+        color = RsiGuideColor,
+        start = Offset(0f, top),
+        end = Offset(size.width, top),
+        strokeWidth = 1f
+    )
+    listOf(RSI_OVERSOLD_LEVEL, RSI_OVERBOUGHT_LEVEL).forEach { level ->
+        val y = yFor(level)
+        drawLine(
+            color = RsiGuideColor.copy(alpha = 0.45f),
+            start = Offset(0f, y),
+            end = Offset(size.width, y),
+            strokeWidth = 1f
+        )
+    }
+
+    path.reset()
+    var started = false
+    for (index in from until to) {
+        val value = rsi.getOrNull(index) ?: continue
+        val candle = allCandles.getOrNull(index) ?: continue
+        val x = cs.timeToX(candle.timeMillis)
+        val y = yFor(value)
+        if (!started) {
+            path.moveTo(x, y)
+            started = true
+        } else {
+            path.lineTo(x, y)
+        }
+    }
+    if (started) {
+        drawPath(path = path, color = RsiColor, style = Stroke(width = 1.5.dp.toPx()))
     }
 }
 

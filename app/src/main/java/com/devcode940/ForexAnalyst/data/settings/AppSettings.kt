@@ -1,5 +1,20 @@
 package com.devcode940.ForexAnalyst.data.settings
 
+import com.google.gson.annotations.SerializedName
+
+/**
+ * UI theme selection.
+ *
+ * WHY: An enum (not String) makes invalid states unrepresentable.
+ * @SerializedName keeps the on-disk JSON values ("system"/"light"/"dark")
+ * stable so existing installs migrate without data loss.
+ */
+enum class ThemeMode {
+    @SerializedName("system") SYSTEM,
+    @SerializedName("light") LIGHT,
+    @SerializedName("dark") DARK
+}
+
 /**
  * All user-configurable application settings.
  *
@@ -33,15 +48,9 @@ data class AppSettings(
     val soundEnabled: Boolean = true,
 
     // Appearance
-    val themeMode: String = "system" // "system" | "light" | "dark"
+    val themeMode: ThemeMode = ThemeMode.SYSTEM
 ) {
     /** WHY: Surface configuration completeness to the UI without leaking keys. */
     val hasMarketDataKey: Boolean get() = fcsApiKey.isNotBlank() || alphaVantageApiKey.isNotBlank()
     val hasAiKey: Boolean get() = openRouterApiKey.isNotBlank()
-
-    companion object {
-        const val THEME_SYSTEM = "system"
-        const val THEME_LIGHT = "light"
-        const val THEME_DARK = "dark"
-    }
 }
