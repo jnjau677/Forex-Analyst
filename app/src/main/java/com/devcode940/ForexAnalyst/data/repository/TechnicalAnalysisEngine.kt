@@ -1,14 +1,20 @@
 package com.devcode940.ForexAnalyst.data.repository
 
+import com.devcode940.ForexAnalyst.data.model.BollingerBands
 import com.devcode940.ForexAnalyst.data.model.CandleStick
 import com.devcode940.ForexAnalyst.data.model.IndicatorSettings
 import com.devcode940.ForexAnalyst.data.model.MACDResult
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.SignalId
 import com.devcode940.ForexAnalyst.data.model.SignalType
+import com.devcode940.ForexAnalyst.data.model.StochasticResult
 import com.devcode940.ForexAnalyst.data.model.Timeframe
 import com.devcode940.ForexAnalyst.data.model.TradeSignal
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZoneOffset
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 /**
  * Pure, stateless technical-analysis math (RSI, EMA, MACD, ATR, signals).
@@ -29,6 +35,9 @@ object TechnicalAnalysisEngine {
     private const val TAKE_PROFIT_2_ATR_MULTIPLIER = 3.0
     private const val SIGNAL_CONFIDENCE = 0.75
     private const val MIN_CANDLES_FOR_SIGNAL = 200
+
+    /** Value reported by bounded oscillators when a window has no range. */
+    private const val NEUTRAL_OSCILLATOR = 50.0
 
     /**
      * Wilder's RSI, index-aligned with [closes] (leading nulls until the
@@ -169,6 +178,216 @@ object TechnicalAnalysisEngine {
 
     fun calculateLatestATR(candles: List<CandleStick>, period: Int = 14): Double? =
         calculateATR(candles, period).lastOrNull()
+
+    /**
+     * Simple moving average, index-aligned with [data].
+     *
+     * WHY kept alongside the EMA: Bollinger Bands are defined on an SMA, and mixing
+     * an EMA mid-line into the band formula changes the width enough to invalidate
+     * the conventional 2σ levels traders read.
+     */
+    fun calculateSMA(data: List<Double>, period: Int): List<Double?> {
+        require(period >= 2) { "SMA period must be >= 2 (got $period)" }
+        if (data.isEmpty()) return emptyList()
+        if (data.size < period) return List(data.size) { null }
+
+        val result = ArrayList<Double?>(data.size)
+        repeat(period - 1) { result.add(null) }
+        // WHY: a rolling sum updated in O(1) per bar instead of re-summing the
+        // window; the naive version is O(n·period), which for 5 000 bars at
+        // period 200 is a million additions per indicator per frame.
+        var sum = data.take(period).sum()
+        result.add(sum / period)
+        for (index in period until data.size) {
+            sum += data[index] - data[index - period]
+            result.add(sum / period)
+        }
+        return result
+    }
+
+    /**
+     * Bollinger Bands: SMA ± [stdDevMultiplier] population standard deviations.
+     *
+     * WHY population (n) rather than sample (n−1) deviation: the band definition
+     * every platform ships uses the population form over the rolling window, so a
+     * sample form would render visibly narrower bands than the user expects and
+     * disagree with their other tools.
+     */
+    fun calculateBollingerBands(
+        closes: List<Double>,
+        period: Int = 20,
+        stdDevMultiplier: Double = 2.0
+    ): BollingerBands {
+        require(period >= 2) { "Bollinger period must be >= 2 (got $period)" }
+        require(stdDevMultiplier.isFinite() && stdDevMultiplier > 0.0) {
+            "Bollinger multiplier must be finite and > 0 (got $stdDevMultiplier)"
+        }
+        if (closes.isEmpty()) {
+            return BollingerBands(emptyList(), emptyList(), emptyList(), emptyList())
+        }
+        val middle = calculateSMA(closes, period)
+        val upper = ArrayList<Double?>(closes.size)
+        val lower = ArrayList<Double?>(closes.size)
+        val bandwidth = ArrayList<Double?>(closes.size)
+
+        for (index in closes.indices) {
+            val mid = middle[index]
+            if (mid == null || index < period - 1) {
+                upper.add(null)
+                lower.add(null)
+                bandwidth.add(null)
+                continue
+            }
+            var variance = 0.0
+            for (offset in 0 until period) {
+                val delta = closes[index - offset] - mid
+                variance += delta * delta
+            }
+            val deviation = sqrt(variance / period)
+            upper.add(mid + deviation * stdDevMultiplier)
+            lower.add(mid - deviation * stdDevMultiplier)
+            // WHY: guard the division — a flat window has mid != 0 in practice, but
+            // a zero mid (a degenerate feed) would otherwise produce Infinity and
+            // poison the squeeze readout.
+            bandwidth.add(if (mid == 0.0) null else (deviation * 2 * stdDevMultiplier) / mid)
+        }
+        return BollingerBands(upper, middle, lower, bandwidth)
+    }
+
+    /**
+     * Session-anchored VWAP.
+     *
+     * WHY anchored per UTC day: VWAP is only meaningful as an average *since the
+     * session open*; a cumulative-from-the-first-bar VWAP on 500 hourly candles
+     * flattens into a near-constant line and tells the trader nothing. Anchoring at
+     * the day boundary makes it the intraday fair-value reference institutions use.
+     *
+     * WHY volume-weighted with a zero-volume fallback: simulated and thin feeds
+     * produce bars with zero volume, where the classic formula divides by zero. Such
+     * bars carry the previous VWAP forward instead of emitting NaN.
+     */
+    fun calculateVWAP(candles: List<CandleStick>, zone: ZoneId = ZoneOffset.UTC): List<Double?> {
+        if (candles.isEmpty()) return emptyList()
+        val result = ArrayList<Double?>(candles.size)
+        var cumulativePriceVolume = 0.0
+        var cumulativeVolume = 0.0
+        var previousDay: LocalDate? = null
+        var previousValue: Double? = null
+
+        for (candle in candles) {
+            val day = candle.time.atZone(zone).toLocalDate()
+            if (previousDay != null && day != previousDay) {
+                // WHY: reset on the session boundary, not on the first bar only.
+                cumulativePriceVolume = 0.0
+                cumulativeVolume = 0.0
+            }
+            previousDay = day
+
+            val typicalPrice = (candle.high + candle.low + candle.close) / 3.0
+            val volume = candle.volume.toDouble()
+            cumulativePriceVolume += typicalPrice * volume
+            cumulativeVolume += volume
+
+            val value = when {
+                cumulativeVolume > 0.0 -> cumulativePriceVolume / cumulativeVolume
+                // WHY: no volume traded yet in this session — the typical price is
+                // the best available estimate and keeps the line continuous.
+                else -> previousValue ?: typicalPrice
+            }
+            previousValue = value
+            result.add(value)
+        }
+        return result
+    }
+
+    /**
+     * Stochastic oscillator: %K over [kPeriod], %D as its [dPeriod]-bar SMA.
+     *
+     * WHY 50 on a flat window: when the highest high equals the lowest low the
+     * classic formula divides by zero. Reporting 50 (neutral) matches the RSI
+     * behaviour already implemented above and avoids a spurious overbought reading
+     * on an illiquid bar.
+     */
+    fun calculateStochastic(
+        candles: List<CandleStick>,
+        kPeriod: Int = 14,
+        dPeriod: Int = 3
+    ): StochasticResult {
+        require(kPeriod >= 2) { "Stochastic %K period must be >= 2 (got $kPeriod)" }
+        require(dPeriod >= 2) { "Stochastic %D period must be >= 2 (got $dPeriod)" }
+        if (candles.isEmpty()) return StochasticResult(emptyList(), emptyList())
+        if (candles.size < kPeriod) {
+            return StochasticResult(List(candles.size) { null }, List(candles.size) { null })
+        }
+
+        val kValues = ArrayList<Double?>(candles.size)
+        repeat(kPeriod - 1) { kValues.add(null) }
+        for (index in (kPeriod - 1) until candles.size) {
+            var highestHigh = Double.NEGATIVE_INFINITY
+            var lowestLow = Double.POSITIVE_INFINITY
+            for (offset in 0 until kPeriod) {
+                val candle = candles[index - offset]
+                if (candle.high > highestHigh) highestHigh = candle.high
+                if (candle.low < lowestLow) lowestLow = candle.low
+            }
+            val range = highestHigh - lowestLow
+            val close = candles[index].close
+            kValues.add(
+                if (range <= 0.0) NEUTRAL_OSCILLATOR
+                else ((close - lowestLow) / range * 100.0).coerceIn(0.0, 100.0)
+            )
+        }
+
+        // WHY: %D is an SMA of the *computed* %K values, aligned back onto the
+        // candle index — dropping nulls and re-zipping is what misaligned MACD.
+        val compact = kValues.filterNotNull()
+        val smoothed = if (compact.size >= dPeriod) calculateSMA(compact, dPeriod) else List(compact.size) { null }
+        val dValues = ArrayList<Double?>(candles.size)
+        val leadingNulls = kValues.size - compact.size
+        repeat(leadingNulls) { dValues.add(null) }
+        dValues.addAll(smoothed)
+        return StochasticResult(kValues, dValues)
+    }
+
+    /**
+     * Heikin-Ashi smoothed candles.
+     *
+     * WHY a transform and not a separate series: Heikin-Ashi is derived from the
+     * previous *smoothed* bar, so it must be computed recursively over the same
+     * candle list. Producing `List<CandleStick>` means the existing renderer, the
+     * price-axis bounds and the crosshair tooltip all work unchanged — the style
+     * switch is a one-line substitution at the draw site.
+     *
+     * WHY volume and timestamps are preserved: the volume pane and the time axis
+     * must keep working when the user switches chart style.
+     */
+    fun heikinAshi(candles: List<CandleStick>): List<CandleStick> {
+        if (candles.isEmpty()) return emptyList()
+        val result = ArrayList<CandleStick>(candles.size)
+        var previousOpen = (candles[0].open + candles[0].close) / 2.0
+        var previousClose = previousOpen
+
+        for (candle in candles) {
+            val close = (candle.open + candle.high + candle.low + candle.close) / 4.0
+            val open = (previousOpen + previousClose) / 2.0
+            result.add(
+                CandleStick(
+                    time = candle.time,
+                    open = open,
+                    // WHY: the smoothed high/low must still bound the smoothed
+                    // open/close, or CandleStick's own invariant would reject the
+                    // bar (and the price axis would clip it).
+                    high = maxOf(candle.high, open, close),
+                    low = minOf(candle.low, open, close),
+                    close = close,
+                    volume = candle.volume
+                )
+            )
+            previousOpen = open
+            previousClose = close
+        }
+        return result
+    }
 
     /**
      * Generates at most one signal from the latest candle.

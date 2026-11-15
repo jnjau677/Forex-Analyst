@@ -1,6 +1,7 @@
 package com.devcode940.ForexAnalyst.data.repository
 
 import android.util.Log
+import com.devcode940.ForexAnalyst.data.db.ChartDrawingEntity
 import com.devcode940.ForexAnalyst.data.db.CustomAlertEntity
 import com.devcode940.ForexAnalyst.data.db.ForexDatabase
 import com.devcode940.ForexAnalyst.data.db.HistoricalCandleEntity
@@ -10,12 +11,18 @@ import com.devcode940.ForexAnalyst.data.model.AlertConditionType
 import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.AppError
 import com.devcode940.ForexAnalyst.data.model.CandleStick
+import com.devcode940.ForexAnalyst.data.model.ChartDrawing
+import com.devcode940.ForexAnalyst.data.model.ChartPoint
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DrawingId
+import com.devcode940.ForexAnalyst.data.model.DrawingStyle
+import com.devcode940.ForexAnalyst.data.model.InstrumentCatalog
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
 import com.devcode940.ForexAnalyst.data.model.SignalId
 import com.devcode940.ForexAnalyst.data.model.SignalType
 import com.devcode940.ForexAnalyst.data.model.Timeframe
+import com.devcode940.ForexAnalyst.data.model.TradeSide
 import com.devcode940.ForexAnalyst.data.model.TradeSignal
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -26,6 +33,7 @@ import java.time.Clock
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
+import kotlin.random.Random
 
 /**
  * Room-backed implementation of [MarketDataRepository].
@@ -48,6 +56,7 @@ class ForexRepository(
     private val watchlistDao = database.watchlistDao()
     private val alertDao = database.alertDao()
     private val candleDao = database.historicalCandleDao()
+    private val drawingDao = database.chartDrawingDao()
 
     // WHY: fetchHistoricalCandles is check-then-insert; without a Mutex two
     // concurrent callers (rapid pair switching) could both miss the cache
@@ -128,7 +137,18 @@ class ForexRepository(
 
             val generated = PriceGenerator.generateCandles(
                 count = safeLimit,
-                basePrice = basePriceFor(pairSymbol.value),
+                // WHY the catalogue drives the simulation: 71 instruments now have
+                // their own base price, volatility and quote precision. The old
+                // hardcoded ladder knew six of them, so every other symbol simulated
+                // as if it were EURUSD at 1.10 — a BTCUSD chart that moved 0.1 % an
+                // hour and quoted five decimals.
+                basePrice = InstrumentCatalog.basePriceFor(pairSymbol),
+                volatility = InstrumentCatalog.volatilityFor(pairSymbol),
+                // WHY the timeframe decides the bar spacing: generating hourly bars
+                // for a D1 chart labels 500 consecutive hours as if they were days,
+                // which breaks the time axis, the session shading and the VWAP anchor.
+                intervalMs = timeframe.intervalMillis,
+                random = simulatorSeed(pairSymbol, timeframe),
                 clock = clock
             )
             candleDao.insertCandles(generated.map { it.toEntity(pairSymbol.value, timeframe.value) })
@@ -191,15 +211,66 @@ class ForexRepository(
         return result
     }
 
-    private fun basePriceFor(symbol: String): Double {
-        return when {
-            symbol.contains("JPY") -> 150.0
-            symbol.contains("XAU") -> 2000.0
-            symbol.contains("XAG") -> 24.0
-            symbol.contains("BTC") -> 65000.0
-            symbol.contains("ETH") -> 3200.0
-            else -> 1.1000
-        }
+    /**
+     * Deterministic generator seed for one chart.
+     *
+     * WHY seeded at all: the simulator re-runs whenever the cache expires. With an
+     * unseeded `Random` the same pair/timeframe came back with a completely different
+     * price history, so the chart "jumped" overnight and every drawing the user had
+     * placed against the old candles pointed at unrelated prices.
+     *
+     * WHY `String.hashCode()` is acceptable *here* (and not for the signal
+     * fingerprint): the seed is never persisted and never compared for equality — it
+     * only has to be stable within a process for the same inputs. A collision merely
+     * makes two charts share a simulation, which is invisible; the fingerprint case
+     * was different because a collision silently swallowed a saved signal.
+     */
+    private fun simulatorSeed(pairSymbol: PairSymbol, timeframe: Timeframe): Random {
+        val seed = pairSymbol.value.hashCode().toLong() * 31L + timeframe.value.hashCode().toLong()
+        return Random(seed)
+    }
+
+    // ---------- Drawings ----------
+
+    override fun observeDrawings(pairSymbol: PairSymbol, timeframe: Timeframe): Flow<List<ChartDrawing>> {
+        return drawingDao
+            .observeDrawings(pairSymbol.value, timeframe.value)
+            .map { rows -> rows.mapNotNull { entity -> entity.toDomainOrNull() } }
+    }
+
+    override suspend fun saveDrawing(drawing: ChartDrawing): Result<Unit> = guarded("saveDrawing") {
+        // WHY REPLACE keyed by the drawing's UUID: dragging an anchor re-saves the
+        // same object, so a retry or a repeated commit updates one row instead of
+        // duplicating it.
+        drawingDao.insertDrawing(drawing.toEntity())
+    }
+
+    override suspend fun saveDrawings(drawings: List<ChartDrawing>): Result<Unit> = guarded("saveDrawings") {
+        if (drawings.isEmpty()) return@guarded
+        drawingDao.insertDrawings(drawings.map { it.toEntity() })
+    }
+
+    override suspend fun deleteDrawing(drawingId: DrawingId): Result<Unit> = guarded("deleteDrawing") {
+        drawingDao.deleteDrawing(drawingId.value.toString())
+    }
+
+    override suspend fun deleteDrawingsForChart(
+        pairSymbol: PairSymbol,
+        timeframe: Timeframe
+    ): Result<Unit> = guarded("deleteDrawingsForChart") {
+        drawingDao.deleteDrawingsForChart(pairSymbol.value, timeframe.value)
+    }
+
+    override suspend fun replaceDrawingsForChart(
+        pairSymbol: PairSymbol,
+        timeframe: Timeframe,
+        drawings: List<ChartDrawing>
+    ): Result<Unit> = guarded("replaceDrawingsForChart") {
+        // WHY filter here as well as in the DAO query: a snapshot can legitimately
+        // contain objects from another chart (the store is global), and writing those
+        // under this chart's key would duplicate them.
+        val scoped = drawings.filter { it.pairSymbol == pairSymbol && it.timeframe == timeframe }
+        drawingDao.replaceDrawingsForChart(pairSymbol.value, timeframe.value, scoped.map { it.toEntity() })
     }
 
     companion object {
@@ -319,3 +390,258 @@ private fun CandleStick.toEntity(symbol: String, timeframe: String): HistoricalC
         volume = volume
     )
 }
+
+// ---------------------------------------------------------------------------
+// Mappers: ChartDrawing (sealed domain) <-> ChartDrawingEntity (one table)
+// ---------------------------------------------------------------------------
+
+/**
+ * Discriminator values stored in `chart_drawings.kind`.
+ *
+ * WHY explicit constants rather than `this::class.simpleName`: a rename or a move of a
+ * domain subtype would silently change the stored discriminator and orphan every
+ * existing row — the user's drawings would simply stop loading, with no error
+ * anywhere. Freezing the spelling turns the mapping into a contract that a refactor
+ * cannot break by accident.
+ */
+private object DrawingKind {
+    const val HORIZONTAL_LINE = "HORIZONTAL_LINE"
+    const val VERTICAL_LINE = "VERTICAL_LINE"
+    const val TREND_LINE = "TREND_LINE"
+    const val FIB_RETRACEMENT = "FIB_RETRACEMENT"
+    const val FIB_EXTENSION = "FIB_EXTENSION"
+    const val RECTANGLE = "RECTANGLE"
+    const val MEASUREMENT = "MEASUREMENT"
+    const val POSITION = "POSITION"
+}
+
+/**
+ * Serializes fib levels.
+ *
+ * WHY `Double.toString()` / `toDouble()` and not a locale-aware formatter: both are
+ * specified to use `.` as the decimal separator regardless of the device locale, and
+ * `toString` emits the shortest representation that round-trips exactly. A
+ * `String.format("%.6f")` would (a) break on a German locale without `Locale.US` and
+ * (b) silently round 0.236 into a level that no longer matches the picker.
+ */
+// WHY `internal` and not `private` for the two mapping directions below: the
+// entity↔domain round trip is the contract that keeps a drawing readable after a
+// restart, and a JVM unit test in the same module is the only cheap way to cover all
+// eight subtypes — the instrumented Room test covers the database, not the mapping.
+// `internal` still keeps them out of the app's public surface.
+internal fun List<Double>.toLevelsCsv(): String = joinToString(separator = ",") { it.toString() }
+
+internal fun String?.toLevelsOrNull(): List<Double>? =
+    this?.split(",")?.map { it.trim().toDouble() }?.takeIf { it.isNotEmpty() }
+
+/** An entity pre-filled with the columns every drawing shares. */
+private fun ChartDrawing.newEntity(kind: String) = ChartDrawingEntity(
+    id = id.value.toString(),
+    pairSymbol = pairSymbol.value,
+    timeframe = timeframe.value,
+    kind = kind,
+    style = style.name,
+    colorArgb = colorArgb,
+    createdAt = createdAt,
+    label = label,
+    startTime = null,
+    startPrice = null,
+    endTime = null,
+    endPrice = null,
+    extendLeft = false,
+    extendRight = false,
+    levelsCsv = null,
+    side = null,
+    entryPrice = null,
+    stopPrice = null,
+    targetPrice = null,
+    riskPercent = null
+)
+
+/**
+ * WHY a horizontal line stores its price in `startPrice` and a vertical line stores
+ * its time in `startTime`: those are the same two anchor columns every two-point tool
+ * uses. Adding `horizontalPrice` and `verticalTime` columns would leave 7 of 8 kinds
+ * with two more nulls each and no gain in clarity.
+ */
+internal fun ChartDrawing.toEntity(): ChartDrawingEntity = when (this) {
+    is ChartDrawing.HorizontalLine -> newEntity(DrawingKind.HORIZONTAL_LINE).copy(startPrice = price)
+
+    is ChartDrawing.VerticalLine ->
+        newEntity(DrawingKind.VERTICAL_LINE).copy(startTime = time.toEpochMilli())
+
+    is ChartDrawing.TrendLine -> newEntity(DrawingKind.TREND_LINE).copy(
+        startTime = start.time.toEpochMilli(),
+        startPrice = start.price,
+        endTime = end.time.toEpochMilli(),
+        endPrice = end.price,
+        extendLeft = extendLeft,
+        extendRight = extendRight
+    )
+
+    is ChartDrawing.FibRetracement -> newEntity(DrawingKind.FIB_RETRACEMENT).copy(
+        startTime = start.time.toEpochMilli(),
+        startPrice = start.price,
+        endTime = end.time.toEpochMilli(),
+        endPrice = end.price,
+        levelsCsv = levels.toLevelsCsv()
+    )
+
+    is ChartDrawing.FibExtension -> newEntity(DrawingKind.FIB_EXTENSION).copy(
+        startTime = start.time.toEpochMilli(),
+        startPrice = start.price,
+        endTime = end.time.toEpochMilli(),
+        endPrice = end.price,
+        levelsCsv = levels.toLevelsCsv()
+    )
+
+    is ChartDrawing.Rectangle -> newEntity(DrawingKind.RECTANGLE).copy(
+        startTime = start.time.toEpochMilli(),
+        startPrice = start.price,
+        endTime = end.time.toEpochMilli(),
+        endPrice = end.price
+    )
+
+    is ChartDrawing.Measurement -> newEntity(DrawingKind.MEASUREMENT).copy(
+        startTime = start.time.toEpochMilli(),
+        startPrice = start.price,
+        endTime = end.time.toEpochMilli(),
+        endPrice = end.price
+    )
+
+    is ChartDrawing.Position -> newEntity(DrawingKind.POSITION).copy(
+        side = side.name,
+        entryPrice = entryPrice,
+        stopPrice = stopPrice,
+        targetPrice = targetPrice,
+        riskPercent = riskPercent
+    )
+}
+
+private fun ChartDrawingEntity.startAnchor(): ChartPoint = ChartPoint(
+    time = Instant.ofEpochMilli(startTime ?: error("row $id has no start time")),
+    price = startPrice ?: error("row $id has no start price")
+)
+
+private fun ChartDrawingEntity.endAnchor(): ChartPoint = ChartPoint(
+    time = Instant.ofEpochMilli(endTime ?: error("row $id has no end time")),
+    price = endPrice ?: error("row $id has no end price")
+)
+
+/**
+ * WHY defensive per row: a drawing's `init` block enforces real invariants (a long's
+ * stop must sit below its entry, fib levels must be ascending and in range). A row
+ * written by an older build, or corrupted storage, can violate them — and one bad row
+ * must never take down the whole chart's object list.
+ */
+internal fun ChartDrawingEntity.toDomainOrNull(): ChartDrawing? = runCatching {
+    val drawingId = DrawingId(UUID.fromString(id))
+    val pair = PairSymbol(pairSymbol)
+    val tf = Timeframe(timeframe)
+    val drawingStyle = DrawingStyle.valueOf(style)
+
+    when (kind) {
+        DrawingKind.HORIZONTAL_LINE -> ChartDrawing.HorizontalLine(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            price = startPrice ?: error("row $id has no price")
+        )
+
+        DrawingKind.VERTICAL_LINE -> ChartDrawing.VerticalLine(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            time = Instant.ofEpochMilli(startTime ?: error("row $id has no time"))
+        )
+
+        DrawingKind.TREND_LINE -> ChartDrawing.TrendLine(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            start = startAnchor(),
+            end = endAnchor(),
+            extendLeft = extendLeft,
+            extendRight = extendRight
+        )
+
+        DrawingKind.FIB_RETRACEMENT -> ChartDrawing.FibRetracement(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            start = startAnchor(),
+            end = endAnchor(),
+            levels = levelsCsv.toLevelsOrNull() ?: ChartDrawing.FibRetracement.DEFAULT_LEVELS
+        )
+
+        DrawingKind.FIB_EXTENSION -> ChartDrawing.FibExtension(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            start = startAnchor(),
+            end = endAnchor(),
+            levels = levelsCsv.toLevelsOrNull() ?: ChartDrawing.FibExtension.DEFAULT_LEVELS
+        )
+
+        DrawingKind.RECTANGLE -> ChartDrawing.Rectangle(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            start = startAnchor(),
+            end = endAnchor()
+        )
+
+        DrawingKind.MEASUREMENT -> ChartDrawing.Measurement(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            start = startAnchor(),
+            end = endAnchor()
+        )
+
+        DrawingKind.POSITION -> ChartDrawing.Position(
+            id = drawingId,
+            pairSymbol = pair,
+            timeframe = tf,
+            style = drawingStyle,
+            colorArgb = colorArgb,
+            createdAt = createdAt,
+            label = label,
+            side = TradeSide.valueOf(side ?: error("row $id has no side")),
+            entryPrice = entryPrice ?: error("row $id has no entry price"),
+            stopPrice = stopPrice ?: error("row $id has no stop price"),
+            targetPrice = targetPrice ?: error("row $id has no target price"),
+            riskPercent = riskPercent ?: ChartDrawing.Position.DEFAULT_RISK_PERCENT
+        )
+
+        else -> error("unknown drawing kind '$kind'")
+    }
+}.onFailure { Log.w("ForexRepository", "Skipping corrupt drawing row id=$id: ${it.message}") }.getOrNull()

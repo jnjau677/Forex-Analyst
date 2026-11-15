@@ -5,13 +5,19 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.devcode940.ForexAnalyst.data.model.AlertConditionType
 import com.devcode940.ForexAnalyst.data.model.AlertId
+import com.devcode940.ForexAnalyst.data.model.ChartDrawing
+import com.devcode940.ForexAnalyst.data.model.ChartPoint
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DrawingId
+import com.devcode940.ForexAnalyst.data.model.DrawingPalette
+import com.devcode940.ForexAnalyst.data.model.DrawingStyle
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
 import com.devcode940.ForexAnalyst.data.model.SignalId
 import com.devcode940.ForexAnalyst.data.model.SignalType
 import com.devcode940.ForexAnalyst.data.model.Timeframe
 import com.devcode940.ForexAnalyst.data.model.TradeSignal
+import com.devcode940.ForexAnalyst.data.model.TradeSide
 import com.devcode940.ForexAnalyst.data.repository.ForexRepository
 import com.devcode940.ForexAnalyst.data.repository.MarketDataRepository
 import kotlinx.coroutines.flow.first
@@ -287,6 +293,227 @@ class ForexRepositoryIntegrationTest {
         assertEquals(exact, stored.createdAt)
     }
 
+    // ------------------------------------------------- chart drawings
+
+    @Test
+    fun drawingsRoundTripThroughSqliteWithEveryColumnIntact() = runBlocking {
+        // WHY every subtype in one test: each owns different columns, and a mapper that
+        // drops one (a missing extend flag, a null riskPercent) still returns an object —
+        // it just returns the wrong one, forever, on every launch after the first.
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+        val drawings = listOf(
+            ChartDrawing.HorizontalLine(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.DASHED, colorArgb = DrawingPalette.DEFAULT,
+                createdAt = clock.instant(), label = "Daily high", price = 1.0925
+            ),
+            ChartDrawing.VerticalLine(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.DOTTED, colorArgb = DrawingPalette.SHORT,
+                createdAt = clock.instant().plusMillis(1), label = "NFP",
+                time = Instant.parse("2024-06-01T09:00:00Z")
+            ),
+            ChartDrawing.TrendLine(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.SOLID, colorArgb = DrawingPalette.LONG,
+                createdAt = clock.instant().plusMillis(2), label = "",
+                start = ChartPoint(Instant.parse("2024-06-01T09:00:00Z"), 1.0800),
+                end = ChartPoint(Instant.parse("2024-06-01T15:00:00Z"), 1.0950),
+                extendLeft = true, extendRight = true
+            ),
+            ChartDrawing.FibRetracement(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.SOLID, colorArgb = DrawingPalette.DEFAULT,
+                createdAt = clock.instant().plusMillis(3), label = "Swing",
+                start = ChartPoint(Instant.parse("2024-06-01T09:00:00Z"), 1.0800),
+                end = ChartPoint(Instant.parse("2024-06-01T15:00:00Z"), 1.0950),
+                levels = listOf(0.0, 0.236, 0.5, 1.0)
+            ),
+            ChartDrawing.FibExtension(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.SOLID, colorArgb = DrawingPalette.SWATCHES[4].argb,
+                createdAt = clock.instant().plusMillis(4), label = "",
+                start = ChartPoint(Instant.parse("2024-06-01T09:00:00Z"), 1.0800),
+                end = ChartPoint(Instant.parse("2024-06-01T15:00:00Z"), 1.0950),
+                levels = listOf(0.0, 1.0, 1.618)
+            ),
+            ChartDrawing.Rectangle(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.SOLID, colorArgb = DrawingPalette.DEFAULT,
+                createdAt = clock.instant().plusMillis(5), label = "Consolidation",
+                start = ChartPoint(Instant.parse("2024-06-01T09:00:00Z"), 1.0800),
+                end = ChartPoint(Instant.parse("2024-06-01T15:00:00Z"), 1.0950)
+            ),
+            ChartDrawing.Measurement(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.DASHED, colorArgb = DrawingPalette.DEFAULT,
+                createdAt = clock.instant().plusMillis(6), label = "",
+                start = ChartPoint(Instant.parse("2024-06-01T09:00:00Z"), 1.0800),
+                end = ChartPoint(Instant.parse("2024-06-01T15:00:00Z"), 1.0950)
+            ),
+            ChartDrawing.Position(
+                id = DrawingId.generate(), pairSymbol = pair, timeframe = timeframe,
+                style = DrawingStyle.SOLID, colorArgb = DrawingPalette.LONG,
+                createdAt = clock.instant().plusMillis(7), label = "London break",
+                side = TradeSide.LONG, entryPrice = 1.0850, stopPrice = 1.0810,
+                targetPrice = 1.0930, riskPercent = 1.5
+            )
+        )
+
+        repository.saveDrawings(drawings).requireData()
+        val stored = repository.observeDrawings(pair, timeframe).first()
+
+        assertEquals(drawings.size, stored.size)
+        // WHY set equality on ids plus element equality: the DAO orders by
+        // (createdAt, rowid), which this fixture satisfies, so the lists must match
+        // element-for-element — a reordering here would change paint order on screen.
+        assertEquals(drawings.map { it.id }.toSet(), stored.map { it.id }.toSet())
+        assertEquals(drawings, stored)
+        assertEquals(drawings.size, database.chartDrawingDao().countDrawings())
+    }
+
+    @Test
+    fun drawingsAreScopedByPairAndTimeframe() = runBlocking {
+        // WHY both dimensions: a level drawn on EURUSD H1 describes those bars and no
+        // others. Leaking it onto the D1 chart of the same pair, or onto the H1 chart of
+        // another pair, puts an object on bars the user never measured.
+        val eurH1 = drawing(PairSymbol("EURUSD"), Timeframe("H1"), price = 1.08)
+        val eurD1 = drawing(PairSymbol("EURUSD"), Timeframe("D1"), price = 1.09)
+        val jpyH1 = drawing(PairSymbol("USDJPY"), Timeframe("H1"), price = 151.5)
+        repository.saveDrawings(listOf(eurH1, eurD1, jpyH1)).requireData()
+
+        assertEquals(listOf(eurH1), repository.observeDrawings(PairSymbol("EURUSD"), Timeframe("H1")).first())
+        assertEquals(listOf(eurD1), repository.observeDrawings(PairSymbol("EURUSD"), Timeframe("D1")).first())
+        assertEquals(listOf(jpyH1), repository.observeDrawings(PairSymbol("USDJPY"), Timeframe("H1")).first())
+        assertTrue(repository.observeDrawings(PairSymbol("GBPUSD"), Timeframe("H1")).first().isEmpty())
+        assertEquals(3, database.chartDrawingDao().countDrawings())
+    }
+
+    @Test
+    fun replacingAChartsDrawingsIsAtomicAndLeavesOtherChartsAlone() = runBlocking {
+        // WHY this is the undo path: restoring a snapshot usually *removes* rows, which
+        // no single-row insert or delete can express. It must be one transaction, or a
+        // crash between the delete and the insert leaves the user with an empty chart.
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+        val kept = drawing(pair, timeframe, price = 1.08)
+        val dropped = drawing(pair, timeframe, price = 1.09)
+        val other = drawing(PairSymbol("GBPUSD"), timeframe, price = 1.27)
+        repository.saveDrawings(listOf(kept, dropped, other)).requireData()
+
+        repository.replaceDrawingsForChart(pair, timeframe, listOf(kept)).requireData()
+
+        assertEquals(listOf(kept), repository.observeDrawings(pair, timeframe).first())
+        // The other chart is not part of this transaction and must be untouched.
+        assertEquals(listOf(other), repository.observeDrawings(PairSymbol("GBPUSD"), timeframe).first())
+        assertEquals(2, database.chartDrawingDao().countDrawings())
+
+        // Undoing back to "nothing on this chart" must actually delete the rows.
+        repository.replaceDrawingsForChart(pair, timeframe, emptyList()).requireData()
+        assertTrue(repository.observeDrawings(pair, timeframe).first().isEmpty())
+        assertEquals(listOf(other), repository.observeDrawings(PairSymbol("GBPUSD"), timeframe).first())
+        assertEquals(1, database.chartDrawingDao().countDrawings())
+    }
+
+    @Test
+    fun savingTheSameDrawingTwiceReplacesRatherThanDuplicates() = runBlocking {
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+        val original = drawing(pair, timeframe, price = 1.08, label = "before")
+
+        repository.saveDrawing(original).requireData()
+        val edited = original.copy(label = "after", price = 1.085)
+        repository.saveDrawing(edited).requireData()
+
+        // WHY: the primary key is the drawing id and the insert strategy is REPLACE, so
+        // an edit is one row, not two objects stacked on the same price.
+        assertEquals(listOf(edited), repository.observeDrawings(pair, timeframe).first())
+        assertEquals(1, database.chartDrawingDao().countDrawings())
+    }
+
+    @Test
+    fun deletingOneDrawingLeavesTheRestOfTheChartIntact() = runBlocking {
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+        val first = drawing(pair, timeframe, price = 1.08)
+        val second = drawing(pair, timeframe, price = 1.09)
+        repository.saveDrawings(listOf(first, second)).requireData()
+
+        repository.deleteDrawing(first.id).requireData()
+
+        assertEquals(listOf(second), repository.observeDrawings(pair, timeframe).first())
+
+        repository.deleteDrawingsForChart(pair, timeframe).requireData()
+        assertTrue(repository.observeDrawings(pair, timeframe).first().isEmpty())
+        assertEquals(0, database.chartDrawingDao().countDrawings())
+    }
+
+    @Test
+    fun corruptDrawingRowIsSkippedInsteadOfCrashingTheStream() = runBlocking {
+        // WHY: a row written by an older build, or by hand, can carry a kind or a column
+        // the current code cannot reconstruct. One unreadable object must never take down
+        // the whole chart's drawing list — the mapper returns null and the stream filters.
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+        val good = drawing(pair, timeframe, price = 1.08)
+        repository.saveDrawing(good).requireData()
+
+        val dao = database.chartDrawingDao()
+        dao.insertDrawing(
+            rawDrawingEntity(kind = "NOT_A_TOOL", id = UUID.randomUUID().toString())
+        )
+        dao.insertDrawing(
+            // A long whose stop sits above its entry: valid columns, impossible object.
+            rawDrawingEntity(
+                kind = "POSITION",
+                id = UUID.randomUUID().toString(),
+                side = "LONG",
+                entryPrice = 1.0,
+                stopPrice = 1.5,
+                targetPrice = 0.5,
+                riskPercent = 1.0
+            )
+        )
+        dao.insertDrawing(
+            // A trend line missing its end anchor.
+            rawDrawingEntity(kind = "TREND_LINE", id = UUID.randomUUID().toString(), startTime = 1L, startPrice = 1.0)
+        )
+        assertEquals(4, dao.countDrawings())
+
+        val stored = repository.observeDrawings(pair, timeframe).first()
+        assertEquals(listOf(good), stored)
+    }
+
+    @Test
+    fun drawingObservationIsBoundedAndOldestFirst() = runBlocking {
+        // WHY bounded: an unbounded table would re-emit the entire history on every
+        // insert, and the renderer would diff hundreds of objects for a change to one.
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+        val dao = database.chartDrawingDao()
+        val total = ChartDrawingDao.MAX_ROWS + 25
+        repeat(total) { index ->
+            dao.insertDrawing(
+                rawDrawingEntity(
+                    kind = "HORIZONTAL_LINE",
+                    id = UUID.randomUUID().toString(),
+                    startPrice = 1.0 + index * 0.0001,
+                    createdAt = clock.instant().plusMillis(index.toLong())
+                )
+            )
+        }
+        assertEquals(total, dao.countDrawings())
+
+        val stored = repository.observeDrawings(pair, timeframe).first()
+        assertEquals(ChartDrawingDao.MAX_ROWS, stored.size)
+        // Oldest first, so the renderer paints the newest object on top and the
+        // hit-tester (which picks the last match) selects what the user sees on top.
+        val times = stored.map { it.createdAt }
+        assertEquals(times.sorted(), times)
+        assertTrue(times.first() < times.last())
+    }
+
     /**
      * Unwraps a [Result.Success] or fails the test with the classified error.
      *
@@ -328,6 +555,72 @@ class ForexRepositoryIntegrationTest {
             note = "integration fixture",
             createdAt = clock.instant()
         )
+
+    private fun drawing(
+        pair: PairSymbol,
+        timeframe: Timeframe,
+        price: Double,
+        label: String = ""
+    ) = ChartDrawing.HorizontalLine(
+        id = DrawingId.generate(),
+        pairSymbol = pair,
+        timeframe = timeframe,
+        style = DrawingStyle.SOLID,
+        colorArgb = DrawingPalette.DEFAULT,
+        createdAt = clock.instant(),
+        label = label,
+        price = price
+    )
+
+    /**
+     * Bypasses the mapper so a row the domain would reject can be inserted.
+     *
+     * WHY: the point of the corrupt-row test is that the *database* holds something the
+     * domain cannot represent, which no repository call can produce.
+     */
+    private fun rawDrawingEntity(
+        kind: String,
+        id: String,
+        pairSymbol: String = "EURUSD",
+        timeframe: String = "H1",
+        style: String = DrawingStyle.SOLID.name,
+        colorArgb: Int = DrawingPalette.DEFAULT,
+        createdAt: Instant = clock.instant(),
+        label: String = "",
+        startTime: Long? = null,
+        startPrice: Double? = null,
+        endTime: Long? = null,
+        endPrice: Double? = null,
+        extendLeft: Boolean = false,
+        extendRight: Boolean = false,
+        levelsCsv: String? = null,
+        side: String? = null,
+        entryPrice: Double? = null,
+        stopPrice: Double? = null,
+        targetPrice: Double? = null,
+        riskPercent: Double? = null
+    ) = ChartDrawingEntity(
+        id = id,
+        pairSymbol = pairSymbol,
+        timeframe = timeframe,
+        kind = kind,
+        style = style,
+        colorArgb = colorArgb,
+        createdAt = createdAt,
+        label = label,
+        startTime = startTime,
+        startPrice = startPrice,
+        endTime = endTime,
+        endPrice = endPrice,
+        extendLeft = extendLeft,
+        extendRight = extendRight,
+        levelsCsv = levelsCsv,
+        side = side,
+        entryPrice = entryPrice,
+        stopPrice = stopPrice,
+        targetPrice = targetPrice,
+        riskPercent = riskPercent
+    )
 
     /** Bypasses the repository so a deliberately corrupt row can be inserted. */
     private fun rawEntity(signalType: String, id: String, fingerprint: String) = SavedSignalEntity(

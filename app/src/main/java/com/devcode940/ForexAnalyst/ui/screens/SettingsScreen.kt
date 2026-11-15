@@ -52,7 +52,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import com.devcode940.ForexAnalyst.data.settings.AppSettings
 import com.devcode940.ForexAnalyst.data.settings.IndicatorFormInput
 import com.devcode940.ForexAnalyst.data.settings.ThemeMode
 import com.devcode940.ForexAnalyst.ui.viewmodel.SettingsViewModel

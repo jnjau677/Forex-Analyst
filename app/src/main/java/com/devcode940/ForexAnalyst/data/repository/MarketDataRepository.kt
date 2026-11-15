@@ -2,7 +2,9 @@ package com.devcode940.ForexAnalyst.data.repository
 
 import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.CandleStick
+import com.devcode940.ForexAnalyst.data.model.ChartDrawing
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DrawingId
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
 import com.devcode940.ForexAnalyst.data.model.Timeframe
@@ -74,6 +76,51 @@ interface MarketDataRepository {
 
     /** Deletes the alert with [alertId] (no-op if absent). */
     suspend fun deleteAlert(alertId: AlertId): Result<Unit>
+
+    // ---------- Chart drawings ----------
+
+    /**
+     * Bounded stream of the drawings that belong to one chart, oldest first.
+     *
+     * WHY scoped by pair *and* timeframe: an H1 trendline is an assertion about H1
+     * bars. Showing it on the D1 chart of the same pair (or the H1 chart of another)
+     * draws a level that means nothing there, which is worse than showing nothing.
+     *
+     * WHY ascending: the renderer paints in list order, so the newest object ends up
+     * on top, and the hit-tester's "last match wins" rule then selects what the user
+     * actually touched.
+     */
+    fun observeDrawings(pairSymbol: PairSymbol, timeframe: Timeframe): Flow<List<ChartDrawing>>
+
+    /** Inserts or replaces [drawing], keyed by its id. */
+    suspend fun saveDrawing(drawing: ChartDrawing): Result<Unit>
+
+    /**
+     * Inserts or replaces [drawings] in one transaction.
+     *
+     * WHY a batch variant: undo/redo and "clear" restore whole snapshots, and N
+     * separate transactions would emit N intermediate flows the UI has to diff.
+     */
+    suspend fun saveDrawings(drawings: List<ChartDrawing>): Result<Unit>
+
+    /** Deletes one drawing (no-op if absent). */
+    suspend fun deleteDrawing(drawingId: DrawingId): Result<Unit>
+
+    /** Deletes every drawing on one chart. */
+    suspend fun deleteDrawingsForChart(pairSymbol: PairSymbol, timeframe: Timeframe): Result<Unit>
+
+    /**
+     * Atomically replaces every drawing on one chart with [drawings].
+     *
+     * WHY: undo/redo restore a whole snapshot, which usually means removing objects
+     * as well as adding them. Two separate calls would leave a window where the chart
+     * shows nothing.
+     */
+    suspend fun replaceDrawingsForChart(
+        pairSymbol: PairSymbol,
+        timeframe: Timeframe,
+        drawings: List<ChartDrawing>
+    ): Result<Unit>
 
     companion object {
         /** WHY: Shared default so the interface and implementations agree. */

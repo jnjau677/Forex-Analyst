@@ -1,5 +1,6 @@
 package com.devcode940.ForexAnalyst.ui.viewmodel
 
+import com.devcode940.ForexAnalyst.awaitSettled
 import com.devcode940.ForexAnalyst.data.model.AlertConditionType
 import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.AppError
@@ -13,6 +14,7 @@ import com.devcode940.ForexAnalyst.data.model.TradeSignal
 import com.devcode940.ForexAnalyst.data.repository.FakeMarketDataRepository
 import com.devcode940.ForexAnalyst.data.repository.PriceGenerator
 import com.devcode940.ForexAnalyst.data.settings.AppSettings
+import com.devcode940.ForexAnalyst.data.settings.ChartSettingsWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,7 +66,24 @@ class ForexViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun viewModel(): ForexViewModel = ForexViewModel(repository, settings)
+    /**
+     * WHY the writer is a lambda over the same [settings] flow: it mirrors production
+     * (the ViewModel writes, the settings flow emits, the chart config follows) without
+     * needing SharedPreferences, a Context or Robolectric.
+     *
+     * WHY the barrier: the constructor kicks off a candle load whose indicator math runs
+     * on `Dispatchers.Default`, a thread `runTest` does not wait for. Every test here
+     * asserts on loaded state, so the helper returns only once the load has settled —
+     * `isLoading` flips to false in a `finally`, after the candles and indicators are
+     * published, which makes it a correct completion signal for both the success and the
+     * failure path.
+     */
+    private fun viewModel(): ForexViewModel = ForexViewModel(
+        repository = repository,
+        settings = settings,
+        settingsWriter = ChartSettingsWriter { transform -> settings.value = transform(settings.value) },
+        clock = clock
+    ).also { loaded -> awaitSettled("the initial candle load") { !loaded.isLoading.value } }
 
     private fun seededCandles(count: Int = 300) =
         PriceGenerator.generateCandles(count = count, random = Random(42), clock = clock)
@@ -94,10 +113,14 @@ class ForexViewModelTest {
 
         // WHY: index alignment is the contract the chart canvas relies on —
         // values[i] is drawn at candles[i].
-        assertEquals(candles.size, indicators.ema20?.size)
-        assertEquals(candles.size, indicators.ema50?.size)
-        assertEquals(candles.size, indicators.ema200?.size)
+        assertEquals(candles.size, indicators.emaFast?.size)
+        assertEquals(candles.size, indicators.emaMedium?.size)
+        assertEquals(candles.size, indicators.emaSlow?.size)
+        assertEquals(candles.size, indicators.sma?.size)
         assertEquals(candles.size, indicators.rsi?.size)
+        assertEquals(candles.size, indicators.vwap?.size)
+        assertEquals(candles.size, indicators.bollinger?.middle?.size)
+        assertEquals(candles.size, indicators.stochastic?.k?.size)
         assertTrue((indicators.macd?.histogram?.size ?: -1) > 0)
     }
 
@@ -111,7 +134,7 @@ class ForexViewModelTest {
 
         // WHY (regression): with the old hardcoded EMA(200) a 120-candle
         // series produced an all-null overlay; EMA(30) must have real values.
-        val emaSlow = indicators.ema200
+        val emaSlow = indicators.emaSlow
         assertEquals(120, emaSlow?.size)
         assertTrue(emaSlow?.take(29)?.all { it == null } == true)
         assertTrue(emaSlow?.get(29) != null)
@@ -192,6 +215,7 @@ class ForexViewModelTest {
         // WHY: flatMapLatest must cancel the EURUSD subscription, otherwise a
         // late EURUSD emission would overwrite the GBPUSD list.
         viewModel.selectPair(gbp)
+        awaitSettled("the GBPUSD reload") { !viewModel.isLoading.value }
         repository.emitSignals(gbp, listOf(testSignal(gbp), testSignal(gbp)))
         assertEquals(2, viewModel.signals.value.size)
 
@@ -267,7 +291,9 @@ class ForexViewModelTest {
 
         val viewModel = viewModel()
 
-        assertNull(viewModel.indicators.value.ema20)
+        assertNull(viewModel.indicators.value.emaFast)
+        assertTrue(viewModel.indicators.value.isEmpty)
+        assertTrue(viewModel.chartState.value.candles.isEmpty())
         assertTrue(viewModel.candles.value.isEmpty())
     }
 

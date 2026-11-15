@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
  * implementation did read-modify-write on `.value`, so two concurrent writers
  * (a toggle flipped while a key is being saved) silently lost one change.
  */
-class SettingsRepository private constructor(context: Context) {
+class SettingsRepository private constructor(context: Context) : ChartSettingsWriter {
 
     private val gson = Gson()
     private val prefs: SharedPreferences = createPrefs(context)
@@ -58,8 +58,12 @@ class SettingsRepository private constructor(context: Context) {
      *
      * WHY: callers express a delta, never a whole-object write, so concurrent
      * updates to different fields cannot clobber each other.
+     *
+     * WHY it also satisfies [ChartSettingsWriter]: the chart terminal needs to
+     * persist display choices but must not be able to reach API keys or the theme, so
+     * it is handed this one method through that interface instead of the repository.
      */
-    fun update(transform: (AppSettings) -> AppSettings) {
+    override fun update(transform: (AppSettings) -> AppSettings) {
         _settings.update(transform)
         persist(_settings.value)
     }

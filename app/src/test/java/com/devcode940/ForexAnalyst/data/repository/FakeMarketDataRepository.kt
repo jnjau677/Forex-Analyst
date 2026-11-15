@@ -2,7 +2,9 @@ package com.devcode940.ForexAnalyst.data.repository
 
 import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.CandleStick
+import com.devcode940.ForexAnalyst.data.model.ChartDrawing
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DrawingId
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
 import com.devcode940.ForexAnalyst.data.model.Timeframe
@@ -32,6 +34,9 @@ class FakeMarketDataRepository : MarketDataRepository {
     /** Next result returned by the alert write operations. */
     var alertResult: Result<Unit> = Result.Success(Unit)
 
+    /** Next result returned by the drawing write operations. */
+    var drawingResult: Result<Unit> = Result.Success(Unit)
+
     /** Recorded arguments, in call order — lets tests assert on queries. */
     val fetchedPairs = mutableListOf<PairSymbol>()
     val fetchedTimeframes = mutableListOf<Timeframe>()
@@ -41,9 +46,14 @@ class FakeMarketDataRepository : MarketDataRepository {
     val watchlistRemovals = mutableListOf<PairSymbol>()
     val savedAlerts = mutableListOf<CustomAlert>()
     val deletedAlertIds = mutableListOf<AlertId>()
+    val savedDrawings = mutableListOf<ChartDrawing>()
+    val deletedDrawingIds = mutableListOf<DrawingId>()
+    val clearedDrawingCharts = mutableListOf<Pair<PairSymbol, Timeframe>>()
+    val replacedDrawingCharts = mutableListOf<Pair<PairSymbol, Timeframe>>()
 
     private val signalsByPair = mutableMapOf<PairSymbol, MutableStateFlow<List<TradeSignal>>>()
     private val alertsByPair = mutableMapOf<PairSymbol, MutableStateFlow<List<CustomAlert>>>()
+    private val drawingsByChart = mutableMapOf<Pair<PairSymbol, Timeframe>, MutableStateFlow<List<ChartDrawing>>>()
     private val watchlistFlow = MutableStateFlow<List<PairSymbol>>(emptyList())
     private val bookmarkedFlow = MutableStateFlow<List<TradeSignal>>(emptyList())
 
@@ -61,6 +71,16 @@ class FakeMarketDataRepository : MarketDataRepository {
     fun emitWatchlist(pairs: List<PairSymbol>) {
         watchlistFlow.value = pairs
     }
+
+    /** Pushes [drawings] as the next emission for one chart. */
+    fun emitDrawings(pairSymbol: PairSymbol, timeframe: Timeframe, drawings: List<ChartDrawing>) {
+        drawingFlow(pairSymbol to timeframe).value = drawings
+    }
+
+    private fun drawingFlow(
+        chart: Pair<PairSymbol, Timeframe>
+    ): MutableStateFlow<List<ChartDrawing>> =
+        drawingsByChart.getOrPut(chart) { MutableStateFlow(emptyList()) }
 
     private fun signalFlow(pair: PairSymbol): MutableStateFlow<List<TradeSignal>> =
         signalsByPair.getOrPut(pair) { MutableStateFlow(emptyList()) }
@@ -115,5 +135,62 @@ class FakeMarketDataRepository : MarketDataRepository {
     override suspend fun deleteAlert(alertId: AlertId): Result<Unit> {
         deletedAlertIds += alertId
         return alertResult
+    }
+
+    override fun observeDrawings(pairSymbol: PairSymbol, timeframe: Timeframe): Flow<List<ChartDrawing>> =
+        drawingFlow(pairSymbol to timeframe)
+
+    // WHY the drawing writes below also update the observed flow: Room re-emits the
+    // query result after every insert or delete, and the ViewModel reconciles that
+    // emission against its in-memory store. A fake that records the call but stays
+    // silent would let every reconciliation bug pass — including the one where our own
+    // write comes back and is adopted as a second undo step, which makes Undo look dead.
+
+    override suspend fun saveDrawing(drawing: ChartDrawing): Result<Unit> {
+        savedDrawings += drawing
+        upsertDrawing(drawing)
+        return drawingResult
+    }
+
+    override suspend fun saveDrawings(drawings: List<ChartDrawing>): Result<Unit> {
+        savedDrawings += drawings
+        drawings.forEach { upsertDrawing(it) }
+        return drawingResult
+    }
+
+    override suspend fun deleteDrawing(drawingId: DrawingId): Result<Unit> {
+        deletedDrawingIds += drawingId
+        drawingsByChart.values.forEach { flow -> flow.value = flow.value.filterNot { it.id == drawingId } }
+        return drawingResult
+    }
+
+    override suspend fun deleteDrawingsForChart(pairSymbol: PairSymbol, timeframe: Timeframe): Result<Unit> {
+        clearedDrawingCharts += pairSymbol to timeframe
+        drawingFlow(pairSymbol to timeframe).value = emptyList()
+        return drawingResult
+    }
+
+    /**
+     * REPLACE-by-id insert, mirroring `OnConflictStrategy.REPLACE`.
+     *
+     * WHY the object moves to the end when its id already exists: SQLite implements
+     * REPLACE as delete-then-insert, which gives the row a new rowid, and the DAO
+     * orders by `createdAt, rowid`. Editing a drawing therefore re-orders it to the top
+     * of the paint stack in the real database too — a fake that kept the old position
+     * would hide that behaviour.
+     */
+    private fun upsertDrawing(drawing: ChartDrawing) {
+        val flow = drawingFlow(drawing.pairSymbol to drawing.timeframe)
+        flow.value = flow.value.filterNot { it.id == drawing.id } + drawing
+    }
+
+    override suspend fun replaceDrawingsForChart(
+        pairSymbol: PairSymbol,
+        timeframe: Timeframe,
+        drawings: List<ChartDrawing>
+    ): Result<Unit> {
+        replacedDrawingCharts += pairSymbol to timeframe
+        drawingFlow(pairSymbol to timeframe).value = drawings
+        return drawingResult
     }
 }

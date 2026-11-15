@@ -28,7 +28,29 @@ per-test instance — is provided by `Room.inMemoryDatabaseBuilder`, which is wh
 * corrupt-row tolerance (`SignalType.valueOf` on garbage must skip the row, not kill the stream),
 * per-timeframe cache isolation and TTL cache hits,
 * LIMIT clamping and retention pruning,
-* alert REPLACE/delete semantics.
+* alert REPLACE/delete semantics,
+* **chart drawings**: all eight subtypes through the real DAO — every column intact on the way back
+  (a dropped `extendLeft` or a null `riskPercent` still returns an object, just the wrong one),
+  scoping by pair *and* timeframe, `REPLACE`-by-id edits, and the `@Transaction` whole-chart replace
+  that undo/redo persists through (it must delete rows *and* leave other charts untouched),
+* corrupt drawing rows (an unknown `kind`, a long whose stop sits above its entry, a trend line with
+  no end anchor) are skipped per row rather than killing the stream,
+* bounded, oldest-first drawing observation (`LIMIT 200`, `ORDER BY createdAt, rowid`), which is what
+  keeps the paint order — and therefore which object a tap selects — stable between launches.
+
+### What is deliberately *not* covered here
+
+`MIGRATION_1_2` (adding the `chart_drawings` table and its index to an existing version-1 database)
+is hand-written DDL. Testing it properly means `MigrationTestHelper` against the exported Room schema
+for version 1, i.e. `app/schemas/com.devcode940.ForexAnalyst.data.db.ForexDatabase/1.json`. That file
+is produced by a real Gradle build (`room.schemaLocation` is already wired in `app/build.gradle.kts`)
+and must then be committed, because a migration test that regenerates its own expectation proves
+nothing. Until a build has run, the migration is verified by inspection against the entity, and the
+gap is recorded in the README's known limitations rather than papered over with a test that cannot
+fail.
+
+The server-side equivalent of the same rule is #2 below: migrations are asserted against committed
+DDL, never against auto-generated schema.
 
 ---
 

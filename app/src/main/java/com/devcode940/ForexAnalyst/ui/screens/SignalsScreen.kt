@@ -25,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.devcode940.ForexAnalyst.data.model.PriceFormatter
 import com.devcode940.ForexAnalyst.data.model.SignalType
 import com.devcode940.ForexAnalyst.data.model.TradeSignal
 import com.devcode940.ForexAnalyst.ui.theme.BearishRed
@@ -121,13 +122,14 @@ private fun SignalRow(signal: TradeSignal) {
         },
         supportingContent = {
             Column {
-                // WHY: Locale.US — "%.5f" uses the default locale (comma vs
-                // dot) and must render identically on every device.
+                // WHY PriceFormatter and not "%.5f": it is locale-stable (always a
+                // dot) *and* instrument-aware, so USDJPY quotes three decimals and
+                // gold two instead of everything being padded to five.
                 Text(
-                    "Entry ${String.format(Locale.US, "%.5f", signal.entryPrice)} · " +
-                        "SL ${String.format(Locale.US, "%.5f", signal.stopLoss)} · " +
-                        "TP ${String.format(Locale.US, "%.5f", signal.takeProfit1)} · " +
-                        "R:R ${String.format(Locale.US, "%.2f", signal.riskRewardRatio)}"
+                    "Entry ${PriceFormatter.format(signal.entryPrice, signal.pairSymbol)} · " +
+                        "SL ${PriceFormatter.format(signal.stopLoss, signal.pairSymbol)} · " +
+                        "TP ${PriceFormatter.format(signal.takeProfit1, signal.pairSymbol)} · " +
+                        "R:R ${PriceFormatter.format(signal.riskRewardRatio, 2)}"
                 )
                 // WHY: confidence and the candle time were persisted but never
                 // shown, so the user could not judge how stale a signal was.

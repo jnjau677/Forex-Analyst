@@ -61,6 +61,37 @@ value class Timeframe(val value: String) {
         require(value in VALID_TIMEFRAMES) { "Invalid timeframe: $value" }
     }
 
+    /**
+     * Duration of one bar of this timeframe.
+     *
+     * WHY: The candle generator used a fixed one-hour interval for every
+     * timeframe, so an M5 chart was populated with hourly bars — the chart,
+     * the time axis and every signal timestamp were an hour apart while
+     * labelled "5 minutes". Interval is an intrinsic property of the
+     * timeframe, so it lives here rather than at each call site.
+     *
+     * Monthly bars are approximated as 30 days: this app has no calendar-aware
+     * bar builder, and a fixed interval keeps the generated series evenly
+     * spaced (which the chart's time-to-pixel mapping assumes).
+     */
+    val intervalMillis: Long
+        get() = when (value) {
+            "M1" -> 60_000L
+            "M5" -> 5 * 60_000L
+            "M15" -> 15 * 60_000L
+            "H1" -> 60 * 60_000L
+            "H4" -> 4 * 60 * 60_000L
+            "D1" -> 24 * 60 * 60_000L
+            "W1" -> 7 * 24 * 60 * 60_000L
+            // WHY: unreachable — the init block already rejects anything else.
+            // A defensive default beats a null or an exception in a getter the
+            // chart calls per frame.
+            else -> 60 * 60_000L
+        }
+
+    /** True for intraday timeframes, where the time axis shows hours and minutes. */
+    val isIntraday: Boolean get() = intervalMillis < 24 * 60 * 60_000L
+
     companion object {
         /**
          * Every supported timeframe, finest first.

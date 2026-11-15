@@ -42,9 +42,9 @@ import androidx.compose.ui.unit.dp
 import com.devcode940.ForexAnalyst.data.model.AlertConditionType
 import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.PriceFormatter
 import com.devcode940.ForexAnalyst.ui.viewmodel.ForexViewModel
 import java.time.Instant
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,9 +96,10 @@ fun AlertsScreen(
                 items(alerts) { alert ->
                     ListItem(
                         headlineContent = {
-                            // WHY: Locale.US — "%.5f" uses the default locale
-                            // (comma vs dot) and must render identically everywhere.
-                            Text("${alert.conditionType.name} ${String.format(Locale.US, "%.5f", alert.targetValue)}")
+                            // WHY PriceFormatter: locale-stable *and* instrument-aware,
+                            // so an alert on USDJPY reads 151.500 and one on XAUUSD
+                            // reads 2350.00 instead of both being padded to 5 decimals.
+                            Text("${alert.conditionType.name} ${PriceFormatter.format(alert.targetValue, alert.pairSymbol)}")
                         },
                         supportingContent = {
                             if (alert.note.isNotBlank()) Text(alert.note)
