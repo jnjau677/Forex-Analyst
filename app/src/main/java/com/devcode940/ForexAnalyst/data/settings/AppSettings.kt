@@ -5,6 +5,8 @@ import com.devcode940.ForexAnalyst.data.model.ChartOverlay
 import com.devcode940.ForexAnalyst.data.model.ChartStyle
 import com.devcode940.ForexAnalyst.data.model.ChartTimeZone
 import com.devcode940.ForexAnalyst.data.model.MagnetMode
+import com.devcode940.ForexAnalyst.data.model.MarketDataProvider
+import com.devcode940.ForexAnalyst.data.model.MarketDataPreference
 import com.google.gson.annotations.SerializedName
 
 /**
@@ -78,6 +80,30 @@ data class AppSettings(
     val showMacd: Boolean = false,
     val showStochastic: Boolean = false,
 
+    // ---- Market data ----
+    /**
+     * Which feed prices come from.
+     *
+     * WHY this is a setting and not inferred from the keys: with both keys present
+     * the choice would be an invisible implementation detail, and with one key whose
+     * quota has run out the user would have no way to stop the app calling it. It is
+     * also how the app is run offline-on-purpose — in a review, or in a test.
+     *
+     * @SerializedName freezes the wire spelling, like every other enum here: Gson
+     * maps an unknown name to `null`, which would put a null into this non-null
+     * field on the next launch after a rename.
+     */
+    val marketDataSource: MarketDataPreference = MarketDataPreference.AUTO,
+
+    /**
+     * Whether the background alert monitor runs.
+     *
+     * WHY a switch exists: evaluation costs battery and, on a metered feed, quota.
+     * A polling loop the user cannot turn off is a one-star review, and "alerts do
+     * not notify" is a setting to check rather than a bug to file.
+     */
+    val alertMonitoringEnabled: Boolean = true,
+
     // ---- API credentials ----
     val fcsApiKey: String = "",
     val alphaVantageApiKey: String = "",
@@ -96,6 +122,32 @@ data class AppSettings(
 ) {
     /** WHY: Surface configuration completeness to the UI without leaking keys. */
     val hasMarketDataKey: Boolean get() = fcsApiKey.isNotBlank() || alphaVantageApiKey.isNotBlank()
+
+    /** The feed prices will actually come from, given the keys that exist. */
+    val resolvedMarketDataProvider: MarketDataProvider
+        get() = MarketDataPreference.resolve(
+            preference = marketDataSource,
+            hasFcsKey = fcsApiKey.isNotBlank(),
+            hasAlphaVantageKey = alphaVantageApiKey.isNotBlank()
+        )
+
+    /**
+     * Live feeds to try, best first, honouring [marketDataSource].
+     *
+     * WHY derived here rather than in the provider layer: the provider layer must
+     * not be handed the whole settings object (it would then have the AI key too),
+     * and this is the only projection of the credentials that feed selection needs.
+     */
+    val liveFeedOrder: List<MarketDataProvider>
+        get() = MarketDataPreference.candidates(
+            preference = marketDataSource,
+            hasFcsKey = fcsApiKey.isNotBlank(),
+            hasAlphaVantageKey = alphaVantageApiKey.isNotBlank()
+        )
+
+    /** Every credential currently held, for scrubbing them out of provider messages. */
+    val configuredSecrets: List<String>
+        get() = listOf(fcsApiKey, alphaVantageApiKey, openRouterApiKey).filter { it.isNotBlank() }
     val hasAiKey: Boolean get() = openRouterApiKey.isNotBlank()
 
     /**

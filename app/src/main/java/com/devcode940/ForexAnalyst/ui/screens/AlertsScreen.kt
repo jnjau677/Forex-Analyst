@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -43,6 +44,7 @@ import com.devcode940.ForexAnalyst.data.model.AlertConditionType
 import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
 import com.devcode940.ForexAnalyst.data.model.PriceFormatter
+import com.devcode940.ForexAnalyst.ui.components.AlertMonitorBanner
 import com.devcode940.ForexAnalyst.ui.viewmodel.ForexViewModel
 import java.time.Instant
 
@@ -73,52 +75,86 @@ fun AlertsScreen(
             )
         }
     ) { padding ->
-        if (alerts.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.Notifications,
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text("No alerts yet. Tap + to create one.")
+        // WHY a Column wrapper: the monitoring banner has to be visible whether or not
+        // there are alerts. A screen that only explains itself once the list is non-empty
+        // is useless in the exact case that needs explaining - no alerts, no idea why.
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            AlertMonitorBanner()
+
+            if (alerts.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Notifications,
+                            contentDescription = null,
+                            modifier = Modifier.size(48.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text("No alerts yet. Tap + to create one.")
+                    }
                 }
-            }
-        } else {
-            LazyColumn(modifier = Modifier.padding(padding)) {
-                items(alerts) { alert ->
-                    ListItem(
-                        headlineContent = {
-                            // WHY PriceFormatter: locale-stable *and* instrument-aware,
-                            // so an alert on USDJPY reads 151.500 and one on XAUUSD
-                            // reads 2350.00 instead of both being padded to 5 decimals.
-                            Text("${alert.conditionType.name} ${PriceFormatter.format(alert.targetValue, alert.pairSymbol)}")
-                        },
-                        supportingContent = {
-                            if (alert.note.isNotBlank()) Text(alert.note)
-                        },
-                        trailingContent = {
-                            Row {
-                                Switch(
-                                    checked = alert.isActive,
-                                    onCheckedChange = {
-                                        viewModel.saveAlert(alert.copy(isActive = !alert.isActive))
+            } else {
+                LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                    items(alerts) { alert ->
+                        ListItem(
+                            headlineContent = {
+                                // WHY PriceFormatter: locale-stable *and* instrument-aware,
+                                // so an alert on USDJPY reads 151.500 and one on XAUUSD
+                                // reads 2350.00 instead of both being padded to 5 decimals.
+                                Text("${alert.conditionType.name} ${PriceFormatter.format(alert.targetValue, alert.pairSymbol)}")
+                            },
+                            supportingContent = {
+                                Column {
+                                    if (alert.isTriggered) {
+                                        // WHY a fired alert stays in the list: deleting it
+                                        // would erase the evidence that it worked, and the
+                                        // user has no way to re-arm an alert they cannot see.
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "Triggered",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.tertiary
+                                            )
+                                            TextButton(onClick = {
+                                                viewModel.saveAlert(alert.copy(isTriggered = false))
+                                            }) {
+                                                Text("Re-arm")
+                                            }
+                                        }
                                     }
-                                )
-                                IconButton(onClick = { viewModel.deleteAlert(alert.id) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete")
+                                    if (alert.note.isNotBlank()) Text(alert.note)
+                                }
+                            },
+                            trailingContent = {
+                                Row {
+                                    Switch(
+                                        checked = alert.isActive,
+                                        onCheckedChange = {
+                                            viewModel.saveAlert(alert.copy(isActive = !alert.isActive))
+                                        }
+                                    )
+                                    IconButton(onClick = { viewModel.deleteAlert(alert.id) }) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete")
+                                    }
                                 }
                             }
-                        }
-                    )
-                    HorizontalDivider()
+                        )
+                        HorizontalDivider()
+                    }
                 }
             }
         }

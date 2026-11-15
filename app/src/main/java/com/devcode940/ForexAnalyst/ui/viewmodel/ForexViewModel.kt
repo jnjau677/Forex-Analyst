@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.devcode940.ForexAnalyst.ForexApplication
 import com.devcode940.ForexAnalyst.data.chart.ChartViewport
 import com.devcode940.ForexAnalyst.data.chart.DraftDrawing
 import com.devcode940.ForexAnalyst.data.chart.DrawingFactory
@@ -19,6 +20,7 @@ import com.devcode940.ForexAnalyst.data.model.ChartDrawing
 import com.devcode940.ForexAnalyst.data.model.ChartStyle
 import com.devcode940.ForexAnalyst.data.model.ChartToolMode
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DataOrigin
 import com.devcode940.ForexAnalyst.data.model.DrawingId
 import com.devcode940.ForexAnalyst.data.model.IndicatorSettings
 import com.devcode940.ForexAnalyst.data.model.IndicatorState
@@ -107,6 +109,16 @@ class ForexViewModel(
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    /**
+     * Where the prices on screen came from.
+     *
+     * WHY forwarded rather than recomputed: only the repository knows whether the last
+     * fetch hit a live feed, was served from its cache, or fell back to the simulator.
+     * Deriving it here from "did the call succeed" would label a simulated fallback as
+     * live, which is the one mistake this badge exists to prevent.
+     */
+    val dataOrigin: StateFlow<DataOrigin> = repository.dataOrigin
 
     /**
      * WHY: The old ViewModel only logged failures, so the user saw an empty
@@ -744,10 +756,19 @@ class ForexViewModel(
                     require(modelClass.isAssignableFrom(ForexViewModel::class.java)) {
                         "Unknown ViewModel class: ${modelClass.name}"
                     }
-                    val database = ForexDatabase.getInstance(application)
                     val settingsRepository = SettingsRepository.getInstance(application)
+                    // WHY the process-wide repository when there is one: it shares the
+                    // alert monitor's quota budget, its candle cache provenance and its
+                    // credential set. A per-ViewModel repository would keep a second
+                    // budget counter against the same monthly allowance, and the chart
+                    // and the alerts would disagree about where prices came from.
+                    // WHY the fallback exists: previews and instrumented tests can run
+                    // with a plain Application, and crashing them with a
+                    // ClassCastException tells nobody anything.
+                    val repository = ForexApplication.graphOf(application)?.repository
+                        ?: ForexRepository(ForexDatabase.getInstance(application))
                     return ForexViewModel(
-                        repository = ForexRepository(database),
+                        repository = repository,
                         settings = settingsRepository.settings,
                         // WHY the repository itself satisfies the writer: it is the
                         // only implementation, and the interface exists to narrow what

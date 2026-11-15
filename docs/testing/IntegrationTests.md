@@ -6,8 +6,14 @@ two layers:
 
 | Layer | Engine | Where it runs | File |
 |---|---|---|---|
-| Unit (pure Kotlin) | JVM, JUnit 4 | `./gradlew :app:testDebugUnitTest` | `app/src/test/**` |
-| Integration (real DB) | SQLite via Room in-memory | `./gradlew :app:connectedDebugAndroidTest` | `app/src/androidTest/**/ForexRepositoryIntegrationTest.kt` |
+| Unit (pure Kotlin) | JVM, JUnit 4 | `./gradlew :app:testDebugUnitTest` | `app/src/test/**` (367 tests, 22 suites) |
+| Integration (real DB) | SQLite via Room in-memory | `./gradlew :app:connectedDebugAndroidTest` | `app/src/androidTest/**/ForexRepositoryIntegrationTest.kt` (27 tests) |
+
+The unit layer carries the whole market-data and alert stack, which is a deliberate design
+constraint rather than a convenience: `data/provider` and `data/alert` import no Android types, so
+provider routing, quota accounting, message redaction, alert evaluation and monitor behaviour all run
+in milliseconds on a JVM. The only Android-bound piece is `AlertNotifier`, and `AlertMonitor`
+depends on the `AlertNotificationSink` interface instead of on it.
 
 ## Why not Testcontainers here
 
@@ -36,7 +42,14 @@ per-test instance — is provided by `Room.inMemoryDatabaseBuilder`, which is wh
 * corrupt drawing rows (an unknown `kind`, a long whose stop sits above its entry, a trend line with
   no end anchor) are skipped per row rather than killing the stream,
 * bounded, oldest-first drawing observation (`LIMIT 200`, `ORDER BY createdAt, rowid`), which is what
-  keeps the paint order — and therefore which object a tap selects — stable between launches.
+  keeps the paint order — and therefore which object a tap selects — stable between launches,
+* **the candle-source seam**: a `CandleSource` double injected into `ForexRepository` proves the
+  rows that land in SQLite came from the source and not from the simulator, that a cache hit inside
+  the TTL does not call it a second time (every call to a live feed costs metered quota), that
+  `invalidateCandleCache()` empties *every* chart and forces the next fetch back through the source,
+  and that `dataOrigin` names the producing feed both after a fetch and after a cache hit,
+* **degradation provenance**: a batch that arrives with a `degradedReason` publishes that error's
+  `userMessage` as the chart notice, so a fallback is explained rather than silently relabelled.
 
 ### What is deliberately *not* covered here
 
@@ -48,6 +61,22 @@ and must then be committed, because a migration test that regenerates its own ex
 nothing. Until a build has run, the migration is verified by inspection against the entity, and the
 gap is recorded in the README's known limitations rather than papered over with a test that cannot
 fail.
+
+The same reasoning now applies to two live-feed decisions. Alerts evaluate on a fixed `H1` timeframe
+and feed provenance lives in an in-memory map, because the alternatives — a `timeframe` column on
+`custom_alerts` and a `provider` column on `historical_candles` — both need migrations that cannot be
+validated without the exported schema JSON. Both gaps are recorded in the README.
+
+**The HTTP boundary itself is not covered by an automated test.** `FcsApi` / `AlphaVantageApi`
+(Retrofit interfaces), `MarketDataHttp` (the OkHttp client and its redacting log interceptor) and the
+status-code classification inside `FcsClient` / `AlphaVantageClient` are exercised only by
+inspection. Everything *around* them is tested on the JVM: the parsers take a `JsonObject` and return
+`List<CandleStick>` with no Android dependency, `LiveCandleSource`'s failover / suspension / refund
+logic is driven by in-test `MarketDataClient` doubles, and `RequestBudget` is pure. The missing piece
+is one `MockWebServer` suite asserting that a 401 becomes `AppError.Unauthorized`, a 429 becomes
+`RateLimited`, a 5xx becomes `ProviderRejected`, and that no request log contains the API key —
+`com.squareup.okhttp3:mockwebserver:4.12.0` as a `testImplementation` dependency, which is
+deliberately *not* declared yet so the build does not carry a dependency no test uses.
 
 The server-side equivalent of the same rule is #2 below: migrations are asserted against committed
 DDL, never against auto-generated schema.

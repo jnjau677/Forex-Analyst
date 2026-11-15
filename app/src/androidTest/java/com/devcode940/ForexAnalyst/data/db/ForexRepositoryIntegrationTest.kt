@@ -5,12 +5,17 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.devcode940.ForexAnalyst.data.model.AlertConditionType
 import com.devcode940.ForexAnalyst.data.model.AlertId
+import com.devcode940.ForexAnalyst.data.model.AppError
+import com.devcode940.ForexAnalyst.data.model.CandleBatch
+import com.devcode940.ForexAnalyst.data.model.CandleSource
+import com.devcode940.ForexAnalyst.data.model.CandleStick
 import com.devcode940.ForexAnalyst.data.model.ChartDrawing
 import com.devcode940.ForexAnalyst.data.model.ChartPoint
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
 import com.devcode940.ForexAnalyst.data.model.DrawingId
 import com.devcode940.ForexAnalyst.data.model.DrawingPalette
 import com.devcode940.ForexAnalyst.data.model.DrawingStyle
+import com.devcode940.ForexAnalyst.data.model.MarketDataProvider
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
 import com.devcode940.ForexAnalyst.data.model.SignalId
@@ -64,7 +69,10 @@ class ForexRepositoryIntegrationTest {
             // threading a dispatcher through every test.
             .allowMainThreadQueries()
             .build()
-        repository = ForexRepository(database, clock)
+        // WHY the clock is named: ForexRepository gained a candleSource parameter between
+        // the database and the clock, so a positional clock no longer compiles - and a
+        // silent parameter reorder is exactly the break a named argument prevents.
+        repository = ForexRepository(database, clock = clock)
     }
 
     @After
@@ -521,6 +529,183 @@ class ForexRepositoryIntegrationTest {
      * (star projection -> Any?) and produce an unchecked-cast warning; this
      * keeps the element type AND reports the actual AppError on failure.
      */
+    // ------------------------------------------------------------------
+    // The candle-source seam (live market data behind the same cache)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun theInjectedCandleSourceSuppliesTheRowsThatGetCached() = runBlocking {
+        // WHY: this is the whole point of the seam. If the repository still called the
+        // simulator directly, a live feed could never reach the cache and the chart.
+        val source = RecordingCandleSource(MarketDataProvider.FCS_API)
+        val live = ForexRepository(database, candleSource = source, clock = clock)
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+
+        val candles = live.fetchHistoricalCandles(pair, timeframe, limit = 120).requireData()
+
+        assertEquals("the source must be asked exactly once", 1, source.calls)
+        assertEquals(120, source.lastLimit)
+        assertEquals(120, candles.size)
+        assertEquals(
+            "the source's own bars must be what comes back",
+            source.produced.single().last(),
+            candles.last()
+        )
+        assertEquals(
+            120,
+            database.historicalCandleDao().getLatestCandles(pair.value, timeframe.value, 500).size
+        )
+    }
+
+    @Test
+    fun aCacheHitInsideTheTtlDoesNotCallTheSourceAgain() = runBlocking {
+        // WHY: every call to a live source spends metered quota. The cache is what keeps
+        // a chart switch or a screen rotation free.
+        val source = RecordingCandleSource(MarketDataProvider.ALPHA_VANTAGE)
+        val live = ForexRepository(database, candleSource = source, clock = clock)
+        val pair = PairSymbol("GBPUSD")
+        val timeframe = Timeframe("M15")
+
+        val first = live.fetchHistoricalCandles(pair, timeframe, limit = 80).requireData()
+        val second = live.fetchHistoricalCandles(pair, timeframe, limit = 80).requireData()
+
+        assertEquals(1, source.calls)
+        assertEquals(first, second)
+    }
+
+    @Test
+    fun invalidatingTheCacheForcesTheNextFetchToReachTheSourceAgain() = runBlocking {
+        // WHY: the TTL is an hour, so without an explicit invalidation pasting an API key
+        // (or switching provider) would appear to do nothing for up to an hour - which
+        // reads as "the key does not work".
+        val source = RecordingCandleSource(MarketDataProvider.FCS_API)
+        val live = ForexRepository(database, candleSource = source, clock = clock)
+        val pair = PairSymbol("EURUSD")
+        val timeframe = Timeframe("H1")
+
+        live.fetchHistoricalCandles(pair, timeframe, limit = 50).requireData()
+        assertEquals(1, source.calls)
+
+        live.invalidateCandleCache().requireData()
+        assertEquals(
+            "the cache table must actually be empty",
+            0,
+            database.historicalCandleDao().getLatestCandles(pair.value, timeframe.value, 500).size
+        )
+
+        live.fetchHistoricalCandles(pair, timeframe, limit = 50).requireData()
+        assertEquals(2, source.calls)
+    }
+
+    @Test
+    fun invalidatingTheCacheEmptiesEveryChartNotJustTheCurrentOne() = runBlocking {
+        // WHY: switching provider or adding a key is a global decision. An invalidation
+        // scoped to the chart on screen would leave every other pair serving rows from
+        // the old feed for up to an hour, so the badge would disagree between screens.
+        val source = RecordingCandleSource(MarketDataProvider.FCS_API)
+        val live = ForexRepository(database, candleSource = source, clock = clock)
+        val dao = database.historicalCandleDao()
+
+        live.fetchHistoricalCandles(PairSymbol("EURUSD"), Timeframe("H1"), limit = 40).requireData()
+        live.fetchHistoricalCandles(PairSymbol("USDJPY"), Timeframe("M15"), limit = 40).requireData()
+        assertEquals(2, source.calls)
+
+        live.invalidateCandleCache().requireData()
+
+        assertEquals(0, dao.getLatestCandles("EURUSD", "H1", 500).size)
+        assertEquals(0, dao.getLatestCandles("USDJPY", "M15", 500).size)
+    }
+
+    @Test
+    fun dataOriginReportsTheFeedAndWhetherTheRowsCameFromCache() = runBlocking {
+        // WHY this is asserted through SQLite and not a fake: the value has to survive a
+        // cache hit, which is a database read on a different code path from the fetch.
+        val source = RecordingCandleSource(MarketDataProvider.FCS_API)
+        val live = ForexRepository(database, candleSource = source, clock = clock)
+        val pair = PairSymbol("USDJPY")
+        val timeframe = Timeframe("H1")
+
+        live.fetchHistoricalCandles(pair, timeframe, limit = 60).requireData()
+        val afterFetch = live.dataOrigin.value
+        assertEquals(MarketDataProvider.FCS_API, afterFetch.provider)
+        assertEquals(false, afterFetch.isCached)
+        assertEquals(null, afterFetch.notice)
+
+        live.fetchHistoricalCandles(pair, timeframe, limit = 60).requireData()
+        val afterHit = live.dataOrigin.value
+        assertEquals(
+            "a cache hit must still name the feed that produced the rows",
+            MarketDataProvider.FCS_API,
+            afterHit.provider
+        )
+        assertEquals(true, afterHit.isCached)
+    }
+
+    @Test
+    fun aDegradedBatchPublishesItsReasonAsASafeNotice() = runBlocking {
+        // WHY: the chart badge has to explain a fallback, and the explanation must be the
+        // provider's *safe* message rather than anything that could carry a key.
+        val source = RecordingCandleSource(
+            provider = MarketDataProvider.SIMULATED,
+            degradedReason = AppError.RateLimited
+        )
+        val live = ForexRepository(database, candleSource = source, clock = clock)
+
+        live.fetchHistoricalCandles(PairSymbol("EURUSD"), Timeframe("H1"), limit = 30).requireData()
+
+        val origin = live.dataOrigin.value
+        assertEquals(MarketDataProvider.SIMULATED, origin.provider)
+        assertEquals(AppError.RateLimited.userMessage, origin.notice)
+    }
+
+    /**
+     * A [CandleSource] double that records how it was used and emits recognisable bars.
+     *
+     * WHY the bars are recognisable rather than realistic: the assertion that matters is
+     * "the rows in SQLite came from the source, not from the simulator", so each bar has
+     * to be distinguishable from anything `PriceGenerator` would produce.
+     */
+    private class RecordingCandleSource(
+        private val provider: MarketDataProvider,
+        private val degradedReason: AppError? = null
+    ) : CandleSource {
+        var calls: Int = 0
+            private set
+        var lastLimit: Int = -1
+            private set
+        val produced = mutableListOf<List<CandleStick>>()
+
+        override suspend fun load(
+            pairSymbol: PairSymbol,
+            timeframe: Timeframe,
+            limit: Int,
+            clock: Clock
+        ): CandleBatch {
+            calls++
+            lastLimit = limit
+            val now = clock.instant()
+            val candles = (0 until limit).map { index ->
+                val price = 2.50000 + index * 0.00001
+                CandleStick(
+                    time = now.minusMillis((limit - 1 - index) * timeframe.intervalMillis),
+                    open = price,
+                    high = price + 0.00001,
+                    low = price - 0.00001,
+                    close = price,
+                    volume = 4_242L
+                )
+            }
+            produced += candles
+            return CandleBatch(
+                candles = candles,
+                source = provider,
+                fetchedAt = now,
+                degradedReason = degradedReason
+            )
+        }
+    }
+
     private fun <T> Result<T>.requireData(): T = when (this) {
         is Result.Success -> data
         is Result.Failure -> throw AssertionError("Expected Success, got ${error.code}: ${error.userMessage}")

@@ -1,6 +1,8 @@
 package com.devcode940.ForexAnalyst.data.repository
 
 import com.devcode940.ForexAnalyst.data.model.CandleStick
+import com.devcode940.ForexAnalyst.data.model.PairSymbol
+import com.devcode940.ForexAnalyst.data.model.Timeframe
 import java.time.Clock
 import java.time.Instant
 import kotlin.random.Random
@@ -45,5 +47,29 @@ object PriceGenerator {
             price = close
         }
         return candles
+    }
+
+    /**
+     * Deterministic generator seed for one chart.
+     *
+     * WHY it lives here and not in the repository: two callers now need it — the
+     * offline source and the live source's fallback path — and the formula has to be
+     * identical in both, or the same chart would simulate differently depending on
+     * which route reached it (a visible price jump when the network drops).
+     *
+     * WHY seeded at all: the simulator re-runs whenever the cache expires. With an
+     * unseeded `Random` the same pair/timeframe came back with a completely different
+     * price history, so the chart "jumped" overnight and every drawing the user had
+     * placed against the old candles pointed at unrelated prices.
+     *
+     * WHY `String.hashCode()` is acceptable *here* (and not for the signal
+     * fingerprint): the seed is never persisted and never compared for equality — it
+     * only has to be stable within a process for the same inputs. A collision merely
+     * makes two charts share a simulation, which is invisible; the fingerprint case was
+     * different because a collision silently swallowed a saved signal.
+     */
+    fun seedFor(pairSymbol: PairSymbol, timeframe: Timeframe): Random {
+        val seed = pairSymbol.value.hashCode().toLong() * 31L + timeframe.value.hashCode().toLong()
+        return Random(seed)
     }
 }

@@ -13,10 +13,12 @@ import com.devcode940.ForexAnalyst.data.model.AppError
 import com.devcode940.ForexAnalyst.data.model.CandleStick
 import com.devcode940.ForexAnalyst.data.model.ChartDrawing
 import com.devcode940.ForexAnalyst.data.model.ChartPoint
+import com.devcode940.ForexAnalyst.data.model.CandleSource
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DataOrigin
 import com.devcode940.ForexAnalyst.data.model.DrawingId
 import com.devcode940.ForexAnalyst.data.model.DrawingStyle
-import com.devcode940.ForexAnalyst.data.model.InstrumentCatalog
+import com.devcode940.ForexAnalyst.data.model.MarketDataProvider
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
 import com.devcode940.ForexAnalyst.data.model.SignalId
@@ -25,6 +27,9 @@ import com.devcode940.ForexAnalyst.data.model.Timeframe
 import com.devcode940.ForexAnalyst.data.model.TradeSide
 import com.devcode940.ForexAnalyst.data.model.TradeSignal
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -33,7 +38,7 @@ import java.time.Clock
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
-import kotlin.random.Random
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Room-backed implementation of [MarketDataRepository].
@@ -49,6 +54,7 @@ import kotlin.random.Random
  */
 class ForexRepository(
     private val database: ForexDatabase,
+    private val candleSource: CandleSource = SimulatedCandleSource(),
     private val clock: Clock = Clock.systemUTC()
 ) : MarketDataRepository {
 
@@ -62,6 +68,26 @@ class ForexRepository(
     // concurrent callers (rapid pair switching) could both miss the cache
     // and double-generate/insert 500 candles.
     private val candleFetchMutex = Mutex()
+
+    /**
+     * Which feed produced the rows currently cached for each chart, keyed
+     * `"$pair|$timeframe"`.
+     *
+     * WHY in memory and not a column: `historical_candles` has no `source` field, and
+     * adding one means a Room migration that this sandbox cannot exercise with
+     * `MigrationTestHelper` (no JDK, no Gradle, no Android SDK). The corner case this
+     * leaves - rows cached by one provider and served while another is selected - is
+     * bounded by the one-hour TTL and reported as a cache hit either way, so the user
+     * is told the prices are not fresh. Recording it properly is noted in the README.
+     *
+     * WHY [ConcurrentHashMap]: the chart and the alert monitor read this from
+     * different coroutines.
+     */
+    private val cachedSources = ConcurrentHashMap<String, MarketDataProvider>()
+
+    private val _dataOrigin = MutableStateFlow(DataOrigin.UNKNOWN)
+
+    override val dataOrigin: StateFlow<DataOrigin> = _dataOrigin.asStateFlow()
 
     // ---------- Signals ----------
 
@@ -130,28 +156,34 @@ class ForexRepository(
             val cachedDesc = candleDao.getLatestCandles(pairSymbol.value, timeframe.value, safeLimit)
             val newest = cachedDesc.firstOrNull()?.timestamp
             if (newest != null && newest.isAfter(now.minusSeconds(CACHE_TTL_SECONDS))) {
+                publishOrigin(
+                    provider = cachedSources[originKey(pairSymbol, timeframe)]
+                        ?: MarketDataProvider.SIMULATED,
+                    isCached = true,
+                    notice = null
+                )
                 // WHY: DAO returns DESC (newest first) for the LIMIT; asReversed
                 // is an O(1) view + O(n) copy, cheaper than a full SQL sort.
                 return@withLock cachedDesc.asReversed().mapNotNull { it.toDomainOrNull() }
             }
 
-            val generated = PriceGenerator.generateCandles(
-                count = safeLimit,
-                // WHY the catalogue drives the simulation: 71 instruments now have
-                // their own base price, volatility and quote precision. The old
-                // hardcoded ladder knew six of them, so every other symbol simulated
-                // as if it were EURUSD at 1.10 — a BTCUSD chart that moved 0.1 % an
-                // hour and quoted five decimals.
-                basePrice = InstrumentCatalog.basePriceFor(pairSymbol),
-                volatility = InstrumentCatalog.volatilityFor(pairSymbol),
-                // WHY the timeframe decides the bar spacing: generating hourly bars
-                // for a D1 chart labels 500 consecutive hours as if they were days,
-                // which breaks the time axis, the session shading and the VWAP anchor.
-                intervalMs = timeframe.intervalMillis,
-                random = simulatorSeed(pairSymbol, timeframe),
+            // WHY the source is injected rather than called directly: this used to be
+            // `PriceGenerator.generateCandles(...)`, which made the simulator the only
+            // possible answer and buried "where do prices come from" inside the class
+            // that owns the cache. Everything below - insert, prune, TTL - is unchanged.
+            val batch = candleSource.load(
+                pairSymbol = pairSymbol,
+                timeframe = timeframe,
+                limit = safeLimit,
                 clock = clock
             )
-            candleDao.insertCandles(generated.map { it.toEntity(pairSymbol.value, timeframe.value) })
+            candleDao.insertCandles(batch.candles.map { it.toEntity(pairSymbol.value, timeframe.value) })
+            cachedSources[originKey(pairSymbol, timeframe)] = batch.source
+            publishOrigin(
+                provider = batch.source,
+                isCached = false,
+                notice = batch.degradedReason?.userMessage
+            )
             // WHY: Bound table growth — without pruning, every cache miss
             // appends 500 rows forever. Retention (30 days) comfortably
             // covers the generated span (500 x 1h ~= 21 days).
@@ -160,8 +192,38 @@ class ForexRepository(
                 timeframe.value,
                 now.minusSeconds(RETENTION_SECONDS)
             )
-            generated
+            batch.candles
         }
+    }
+
+    override suspend fun invalidateCandleCache(): Result<Unit> = guarded("invalidateCandleCache") {
+        // WHY clear the provenance map too: leaving it would label the next cache hit
+        // with a feed whose rows were just deleted.
+        cachedSources.clear()
+        candleDao.deleteAllCandles()
+        Unit
+    }
+
+    private fun originKey(pairSymbol: PairSymbol, timeframe: Timeframe): String =
+        "${pairSymbol.value}|${timeframe.value}"
+
+    /**
+     * Publishes where the current chart's prices came from.
+     *
+     * WHY a single global value rather than a per-chart map: the UI shows one badge on
+     * one chart at a time, and a map would have to be diffed by the collector to work
+     * out whether *its* chart changed. The last fetch wins, which is the chart on
+     * screen.
+     */
+    private fun publishOrigin(
+        provider: MarketDataProvider,
+        isCached: Boolean,
+        notice: String?
+    ) {
+        // WHY the pair and timeframe are not part of DataOrigin: the badge renders
+        // inside a chart header that already states both, so carrying them here would
+        // only invite a collector to filter on them and miss an update.
+        _dataOrigin.value = DataOrigin(provider = provider, isCached = isCached, notice = notice)
     }
 
     // ---------- Alerts ----------
@@ -209,25 +271,6 @@ class ForexRepository(
             }
         }
         return result
-    }
-
-    /**
-     * Deterministic generator seed for one chart.
-     *
-     * WHY seeded at all: the simulator re-runs whenever the cache expires. With an
-     * unseeded `Random` the same pair/timeframe came back with a completely different
-     * price history, so the chart "jumped" overnight and every drawing the user had
-     * placed against the old candles pointed at unrelated prices.
-     *
-     * WHY `String.hashCode()` is acceptable *here* (and not for the signal
-     * fingerprint): the seed is never persisted and never compared for equality — it
-     * only has to be stable within a process for the same inputs. A collision merely
-     * makes two charts share a simulation, which is invisible; the fingerprint case
-     * was different because a collision silently swallowed a saved signal.
-     */
-    private fun simulatorSeed(pairSymbol: PairSymbol, timeframe: Timeframe): Random {
-        val seed = pairSymbol.value.hashCode().toLong() * 31L + timeframe.value.hashCode().toLong()
-        return Random(seed)
     }
 
     // ---------- Drawings ----------

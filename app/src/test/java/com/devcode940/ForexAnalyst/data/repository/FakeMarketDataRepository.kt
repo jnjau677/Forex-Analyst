@@ -4,6 +4,7 @@ import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.CandleStick
 import com.devcode940.ForexAnalyst.data.model.ChartDrawing
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DataOrigin
 import com.devcode940.ForexAnalyst.data.model.DrawingId
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
@@ -11,6 +12,8 @@ import com.devcode940.ForexAnalyst.data.model.Timeframe
 import com.devcode940.ForexAnalyst.data.model.TradeSignal
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * In-memory [MarketDataRepository] double for JVM unit tests.
@@ -36,6 +39,40 @@ class FakeMarketDataRepository : MarketDataRepository {
 
     /** Next result returned by the drawing write operations. */
     var drawingResult: Result<Unit> = Result.Success(Unit)
+
+    /** Alerts returned by [getActiveAlerts]; the real repository filters triggered rows out. */
+    var activeAlerts: List<CustomAlert> = emptyList()
+
+    /**
+     * Overrides the whole [getActiveAlerts] result, so a test can make the *read* fail.
+     *
+     * WHY separate from [alertResult]: that one drives the writes. Conflating them would
+     * make it impossible to test "reading alerts failed" and "saving a trigger failed"
+     * separately, and those two have completely different consequences for the monitor.
+     */
+    var alertReadResult: Result<List<CustomAlert>>? = null
+
+    /** Provenance published by [dataOrigin]. */
+    var origin: DataOrigin = DataOrigin.UNKNOWN
+
+    /** Number of times [invalidateCandleCache] was called. */
+    var cacheInvalidations: Int = 0
+        private set
+
+    private val originFlow = MutableStateFlow(DataOrigin.UNKNOWN)
+
+    override val dataOrigin: StateFlow<DataOrigin> = originFlow.asStateFlow()
+
+    /** Publishes [value] through [dataOrigin], the way the real repository does. */
+    fun emitOrigin(value: DataOrigin) {
+        origin = value
+        originFlow.value = value
+    }
+
+    override suspend fun invalidateCandleCache(): Result<Unit> {
+        cacheInvalidations++
+        return Result.Success(Unit)
+    }
 
     /** Recorded arguments, in call order — lets tests assert on queries. */
     val fetchedPairs = mutableListOf<PairSymbol>()
@@ -125,7 +162,12 @@ class FakeMarketDataRepository : MarketDataRepository {
         return watchlistResult
     }
 
-    override suspend fun getActiveAlerts(): Result<List<CustomAlert>> = Result.Success(emptyList())
+    override suspend fun getActiveAlerts(): Result<List<CustomAlert>> =
+        alertReadResult
+            // WHY mirror the real filter: AlertDao.getActiveAlerts() excludes rows already
+            // triggered, so a fake that returned them would let the monitor re-fire an
+            // alert that production could not.
+            ?: Result.Success(activeAlerts.filter { it.isActive && !it.isTriggered })
 
     override suspend fun saveAlert(alert: CustomAlert): Result<Unit> {
         savedAlerts += alert

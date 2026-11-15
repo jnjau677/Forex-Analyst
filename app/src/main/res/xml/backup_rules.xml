@@ -7,4 +7,11 @@
 <full-backup-content>
     <exclude domain="sharedpref" path="app_settings_secure.xml" />
     <exclude domain="sharedpref" path="app_settings.xml" />
+    <!--
+      WHY the quota counter is excluded too: it records how many market-data
+      requests this device has made this month. Restoring it onto a new device (or
+      after a reinstall) would deny requests the user has not made, and the app
+      would refuse to fetch prices with no way to explain why.
+    -->
+    <exclude domain="sharedpref" path="market_data_quota.xml" />
 </full-backup-content>

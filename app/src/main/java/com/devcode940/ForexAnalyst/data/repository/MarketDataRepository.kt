@@ -4,12 +4,14 @@ import com.devcode940.ForexAnalyst.data.model.AlertId
 import com.devcode940.ForexAnalyst.data.model.CandleStick
 import com.devcode940.ForexAnalyst.data.model.ChartDrawing
 import com.devcode940.ForexAnalyst.data.model.CustomAlert
+import com.devcode940.ForexAnalyst.data.model.DataOrigin
 import com.devcode940.ForexAnalyst.data.model.DrawingId
 import com.devcode940.ForexAnalyst.data.model.PairSymbol
 import com.devcode940.ForexAnalyst.data.model.Result
 import com.devcode940.ForexAnalyst.data.model.Timeframe
 import com.devcode940.ForexAnalyst.data.model.TradeSignal
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Abstraction over all persisted market data, watchlist, signal and alert access.
@@ -38,8 +40,9 @@ interface MarketDataRepository {
     fun observeAlerts(pairSymbol: PairSymbol): Flow<List<CustomAlert>>
 
     /**
-     * Up to [limit] candles (ascending by time) for a pair/timeframe,
-     * generated and cached on a miss.
+     * Up to [limit] candles (ascending by time) for a pair/timeframe, fetched from the
+     * configured [com.devcode940.ForexAnalyst.data.model.CandleSource] and cached on a
+     * miss.
      *
      * WHY: timeframe is a parameter — hardcoding it silently served the
      * wrong granularity whenever the user switched the chart timeframe.
@@ -49,6 +52,25 @@ interface MarketDataRepository {
         timeframe: Timeframe,
         limit: Int = DEFAULT_CANDLE_LIMIT
     ): Result<List<CandleStick>>
+
+    /**
+     * Where the prices on screen came from, and why they might not be live.
+     *
+     * WHY the repository owns this and not the ViewModel: only the layer that decided
+     * between cache, live feed and simulator knows the answer. A ViewModel guessing it
+     * from "did the fetch succeed" would report live prices for a cache hit that was
+     * written by the simulator an hour ago - the exact mistake this badge exists to
+     * prevent.
+     */
+    val dataOrigin: StateFlow<DataOrigin>
+
+    /**
+     * Drops every cached candle so the next fetch reaches the configured source.
+     *
+     * WHY: the cache TTL is an hour, so adding an API key, switching provider or
+     * switching to offline would otherwise appear to do nothing until it expired.
+     */
+    suspend fun invalidateCandleCache(): Result<Unit>
 
     /**
      * Persists [signals] idempotently.

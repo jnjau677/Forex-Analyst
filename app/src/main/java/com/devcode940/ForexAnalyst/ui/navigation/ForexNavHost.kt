@@ -56,9 +56,14 @@ object Routes {
  *
  * @param forexViewModel market-data ViewModel shared by all trading screens.
  * @param settingsViewModel preferences ViewModel shared by all settings screens.
+ * @param startDestination first screen to show. WHY a parameter: tapping an alert
+ *   notification should land on the Alerts screen, and `MainActivity` validates the
+ *   requested route before passing it here - so this value is always one of the
+ *   [Routes] constants and the NavHost cannot be handed a route it does not have.
  */
 @Composable
 fun ForexNavHost(
+    startDestination: String = Routes.CHART_DEFAULT,
     forexViewModel: ForexViewModel = viewModel(
         factory = ForexViewModel.Factory(LocalContext.current.applicationContext as Application)
     ),
@@ -66,7 +71,7 @@ fun ForexNavHost(
 ) {
     val nav = rememberNavController()
 
-    NavHost(navController = nav, startDestination = Routes.CHART_DEFAULT) {
+    NavHost(navController = nav, startDestination = startDestination) {
 
         composable(Routes.CHART_DEFAULT) {
             ChartRoute(forexViewModel, nav)

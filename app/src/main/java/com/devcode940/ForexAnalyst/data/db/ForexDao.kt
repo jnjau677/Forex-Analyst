@@ -91,4 +91,18 @@ interface HistoricalCandleDao {
      */
     @Query("DELETE FROM historical_candles WHERE symbol = :symbol AND timeframe = :timeframe AND timestamp < :before")
     suspend fun deleteOlderThan(symbol: String, timeframe: String, before: Instant): Int
+
+    /**
+     * Empties the whole candle cache.
+     *
+     * WHY this exists: the cache has a one-hour TTL, and rows written before the user
+     * added an API key are simulated. Without an explicit invalidation, pasting a key
+     * in Settings would appear to do nothing for up to an hour - which reads as "the
+     * key does not work" and costs a support round trip. The same call covers
+     * switching provider and switching data source.
+     *
+     * Returns the number of rows deleted.
+     */
+    @Query("DELETE FROM historical_candles")
+    suspend fun deleteAllCandles(): Int
 }

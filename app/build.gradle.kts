@@ -43,6 +43,10 @@ android {
 
     buildFeatures {
         compose = true
+        // WHY enabled explicitly: AGP 8 no longer generates BuildConfig by default, and
+        // MarketDataProviderRegistry reads BuildConfig.DEBUG to decide whether request
+        // logging is compiled in. Without this the reference does not resolve.
+        buildConfig = true
     }
 
     testOptions {
@@ -89,11 +93,23 @@ dependencies {
     // WHY: EncryptedSharedPreferences for API keys (Jetpack Security).
     implementation("androidx.security:security-crypto:1.1.0")
 
-    // Networking
+    // Networking — used by the market-data providers (FCS API, Alpha Vantage).
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
-    // WHY: debugImplementation — the logging interceptor prints headers,
-    // which would leak API keys into logcat in release builds.
+    // WHY OkHttp is declared explicitly: retrofit 2.9.0 pulls in OkHttp 3.14.9 while
+    // the logging interceptor below is 4.12.0, so debug and release builds resolved
+    // two different OkHttp versions. Pinning one removes that split, and the provider
+    // layer now builds its own client (MarketDataHttp) rather than relying on a
+    // transitive one.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // WHY Gson is declared explicitly: the providers parse into com.google.gson
+    // JsonObject directly, and a class imported by main sources must not depend on a
+    // transitive edge that a converter upgrade could drop.
+    implementation("com.google.code.gson:gson:2.10.1")
+    // WHY: debugImplementation — the logging interceptor prints headers and bodies,
+    // which would leak API keys into logcat in release builds. The providers use a
+    // query-parameter key, so they log through RedactedRequestLogInterceptor instead;
+    // this stays available for ad-hoc debugging only.
     debugImplementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
     // Coroutines

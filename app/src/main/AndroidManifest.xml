@@ -4,10 +4,30 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+      WHY POST_NOTIFICATIONS: from API 33 onward a notification posted without this
+      runtime permission is silently dropped. Alert evaluation would appear to work
+      (the alert is marked triggered, nothing is thrown) while the user never sees
+      anything - the worst possible failure mode for an alert feature.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      WHY VIBRATE: the alert channel can be configured to vibrate. It is a normal
+      (install-time) permission, so declaring it costs the user nothing, and omitting
+      it makes vibration fail silently on the OEM builds that still check for it.
+    -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!--
+      WHY allowBackup stays true but is paired with explicit exclusions: backup is
+      genuinely useful for a single-user app (settings, watchlist, drawings), while
+      the two files that hold third-party API keys are excluded in res/xml so they
+      never reach Google's servers or a device-to-device transfer.
+    -->
     <application
         android:name=".ForexApplication"
         android:allowBackup="true"
-        <!-- WHY: Exclude API keys from cloud/device backups (see res/xml). -->
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@drawable/ic_launcher"

@@ -45,6 +45,49 @@ sealed class AppError(
     )
 
     /**
+     * The market-data provider rejected the credential (HTTP 401/403).
+     *
+     * WHY its own case: "check your connection" sends the user to the wrong screen. A
+     * rejected key has exactly one fix, and it lives in Settings.
+     */
+    object Unauthorized : AppError(
+        code = "PROVIDER_UNAUTHORIZED",
+        userMessage = "The market data provider rejected your API key. Check it in Settings."
+    )
+
+    /**
+     * The provider's request quota is exhausted (HTTP 429, or a 200 carrying its
+     * rate-limit note — Alpha Vantage answers 200 with a `"Note"` body).
+     */
+    object RateLimited : AppError(
+        code = "RATE_LIMITED",
+        userMessage = "The market data provider's daily limit is used up. Try again later, or switch provider in Settings."
+    )
+
+    /**
+     * The selected provider does not serve this instrument or timeframe.
+     *
+     * WHY an error and not a silent fallback: the alternative is a chart of invented
+     * prices with nothing to explain them. The caller falls back *and* reports why.
+     */
+    object Unsupported : AppError(
+        code = "PROVIDER_UNSUPPORTED",
+        userMessage = "That market or timeframe is not covered by the selected data provider."
+    )
+
+    /**
+     * The provider answered with a refusal this app does not classify further.
+     *
+     * WHY [reason] is safe to render: it is the provider's own short message, truncated
+     * and passed through `redactSecrets` before it reaches here, so neither the API key
+     * nor a full response body can leak into the UI or a bug report.
+     */
+    data class ProviderRejected(val reason: String) : AppError(
+        code = "PROVIDER_REJECTED",
+        userMessage = "The data provider refused the request: $reason"
+    )
+
+    /**
      * Catch-all. WHY: [cause] is @Transient-style internal-only: it is logged,
      * never rendered. The user sees a generic, actionable message.
      */
@@ -55,6 +98,34 @@ sealed class AppError(
         companion object {
             /** WHY: Named factory hides the constructor so callers cannot invent messages. */
             fun of(cause: Throwable?): Unknown = Unknown(cause)
+        }
+    }
+}
+
+/**
+ * A market-data provider failure that has already been classified.
+ *
+ * WHY an exception carrying an [AppError] rather than a `Result` return type:
+ * provider clients parse JSON, read HTTP statuses and hit the network, all of
+ * which fail with exceptions anyway. Forcing every one of them to build a
+ * `Result.Failure` at each `throw` site is the same boilerplate that lets one
+ * site forget — and the one that forgets leaks a stack trace into the UI.
+ * Instead clients throw this, and [Result.of] unwraps it, so classification
+ * still happens in exactly one place.
+ *
+ * WHY it lives in `data.model` and not `data.provider`: [Result.of] has to
+ * catch it, and the model layer must not depend on the network layer.
+ */
+class MarketDataException(
+    val error: AppError,
+    cause: Throwable? = null
+) : Exception(error.code, cause) {
+    init {
+        // WHY: `AppError.Unknown` already carries its own cause. Nesting it here
+        // too would produce a two-deep wrapper for one failure and make logcat
+        // harder to read.
+        require(error !is AppError.Unknown) {
+            "Use AppError.Unknown.of(cause) via Result.of instead of MarketDataException"
         }
     }
 }
@@ -86,6 +157,11 @@ sealed interface Result<out T> {
          */
         suspend fun <T> of(block: suspend () -> T): Result<T> = try {
             Success(block())
+        } catch (e: MarketDataException) {
+            // WHY first in the ladder: this one is already classified by the
+            // provider layer. Re-classifying it as Unknown would throw away
+            // the distinction between "your key is wrong" and "we crashed".
+            Failure(e.error)
         } catch (e: IllegalArgumentException) {
             // WHY: Domain invariant violated (require() in models) — this is
             // a validation problem, not an internal crash.

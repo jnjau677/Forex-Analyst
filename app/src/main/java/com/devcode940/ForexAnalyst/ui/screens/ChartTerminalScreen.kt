@@ -43,6 +43,7 @@ import com.devcode940.ForexAnalyst.ui.chart.ChartColors
 import com.devcode940.ForexAnalyst.ui.chart.ChartUiState
 import com.devcode940.ForexAnalyst.ui.components.CandlestickChartCanvas
 import com.devcode940.ForexAnalyst.ui.components.ChartToolbar
+import com.devcode940.ForexAnalyst.ui.components.DataSourceBadge
 import com.devcode940.ForexAnalyst.ui.theme.BearishRed
 import com.devcode940.ForexAnalyst.ui.theme.BullishGreen
 import com.devcode940.ForexAnalyst.ui.viewmodel.ForexViewModel
@@ -67,6 +68,10 @@ fun ChartTerminalScreen(
     // jumped when I toggled RSI".
     val chartState by viewModel.chartState.collectAsState()
     val drawingHistory by viewModel.drawingHistory.collectAsState()
+    // WHY collected here: the badge has to say whether these prices are live or
+    // generated, and only the repository knows. Without it a simulated chart is
+    // indistinguishable from a real one, which is the one thing this app must not do.
+    val dataOrigin by viewModel.dataOrigin.collectAsState()
 
     // WHY resolve the theme here rather than calling isSystemInDarkTheme() alone: the
     // app can be pinned to light or dark in Settings, and a chart that followed the
@@ -133,6 +138,8 @@ fun ChartTerminalScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
+
+            DataSourceBadge(origin = dataOrigin)
 
             ChartToolbar(
                 state = chartState,

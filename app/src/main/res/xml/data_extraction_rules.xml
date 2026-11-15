@@ -8,9 +8,11 @@
     <cloud-backup>
         <exclude domain="sharedpref" path="app_settings_secure.xml" />
         <exclude domain="sharedpref" path="app_settings.xml" />
+        <exclude domain="sharedpref" path="market_data_quota.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="app_settings_secure.xml" />
         <exclude domain="sharedpref" path="app_settings.xml" />
+        <exclude domain="sharedpref" path="market_data_quota.xml" />
     </device-transfer>
 </data-extraction-rules>
