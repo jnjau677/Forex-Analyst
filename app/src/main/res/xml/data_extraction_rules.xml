@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WHY: API 31+ replaces full-backup-content for cloud backup AND device-to-device
+  transfer. Both paths must exclude the credential stores, otherwise keys travel
+  to a new device in plaintext.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="app_settings_secure.xml" />
+        <exclude domain="sharedpref" path="app_settings.xml" />
+        <exclude domain="sharedpref" path="market_data_quota.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="app_settings_secure.xml" />
+        <exclude domain="sharedpref" path="app_settings.xml" />
+        <exclude domain="sharedpref" path="market_data_quota.xml" />
+    </device-transfer>
+</data-extraction-rules>

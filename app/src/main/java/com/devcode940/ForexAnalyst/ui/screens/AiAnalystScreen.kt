@@ -21,12 +21,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.devcode940.ForexAnalyst.ui.viewmodel.ForexViewModel
 
+/**
+ * Placeholder screen for LLM-driven market commentary.
+ *
+ * WHY no ViewModel parameter: the screen renders no market state yet, and an
+ * unused dependency is a false signal to the next reader that it does.
+ *
+ * @param onBack navigation callback to the previous destination.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiAnalystScreen(
-    viewModel: ForexViewModel,
     onBack: () -> Unit
 ) {
     Scaffold(
