@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background -->
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M0,0h108v108h-108z" />
+    <!-- Candlestick 1 (Bearish) -->
+    <path
+        android:fillColor="#EF5350"
+        android:pathData="M30,45h12v25h-12z" />
+    <path
+        android:strokeColor="#EF5350"
+        android:strokeWidth="2"
+        android:pathData="M36,35v10M36,70v10" />
+    <!-- Candlestick 2 (Bullish) -->
+    <path
+        android:fillColor="#26A69A"
+        android:pathData="M50,35h12v30h-12z" />
+    <path
+        android:strokeColor="#26A69A"
+        android:strokeWidth="2"
+        android:pathData="M56,25v10M56,65v15" />
+    <!-- Candlestick 3 (Bullish) -->
+    <path
+        android:fillColor="#26A69A"
+        android:pathData="M70,25h12v20h-12z" />
+    <path
+        android:strokeColor="#26A69A"
+        android:strokeWidth="2"
+        android:pathData="M76,15v10M76,45v10" />
+    <!-- Trend Line -->
+    <path
+        android:strokeColor="#FFEB3B"
+        android:strokeWidth="3"
+        android:pathData="M25,75L45,60L65,45L85,25" />
+</vector>
