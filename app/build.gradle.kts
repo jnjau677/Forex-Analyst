@@ -4,6 +4,54 @@ plugins {
     id("kotlin-kapt")
 }
 
+// -------------------------------------------------------------------------------------
+// Release signing
+//
+// WHY the credentials are read from Gradle properties or the environment and never from
+// this file: a keystore or password committed to the repository means anyone who clones it
+// can publish an update to this app under the same signature, and a signing key cannot be
+// rotated without breaking every existing install. Both sources are honoured so one build
+// works from a developer machine (~/.gradle/gradle.properties, which is outside the repo)
+// and from CI (repository secrets exported as environment variables):
+//
+//     forexStoreFile / FOREX_STORE_FILE         path to the .jks or .keystore
+//     forexStorePassword / FOREX_STORE_PASSWORD
+//     forexKeyAlias / FOREX_KEY_ALIAS
+//     forexKeyPassword / FOREX_KEY_PASSWORD
+//
+// WHY an absent or incomplete configuration is not an error: `assembleRelease` still has to
+// produce an APK on a machine with no keystore, because an unsigned release build is what
+// you measure for size, dex count and resource shrinking. What must never happen is a build
+// that looks signed but is not - so the credentials are either all present and the keystore
+// exists, or the build type is left unsigned and AGP names the output
+// app-release-unsigned.apk, which no launcher will install.
+// -------------------------------------------------------------------------------------
+val signingValue: (String, String) -> String? = { property, env ->
+    (findProperty(property) as? String)?.trim()?.takeIf { it.isNotEmpty() }
+        ?: System.getenv(env)?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+val releaseStoreFile = signingValue("forexStoreFile", "FOREX_STORE_FILE")
+val releaseStorePassword = signingValue("forexStorePassword", "FOREX_STORE_PASSWORD")
+val releaseKeyAlias = signingValue("forexKeyAlias", "FOREX_KEY_ALIAS")
+val releaseKeyPassword = signingValue("forexKeyPassword", "FOREX_KEY_PASSWORD")
+
+val releaseSigningReady = releaseStoreFile != null &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null &&
+    file(releaseStoreFile).exists()
+
+// WHY warn at configuration time: when the path is wrong, AGP otherwise fails late and
+// cryptically inside packageRelease. Naming the missing property here turns a CI log
+// excavation into a five-second fix.
+if (releaseStoreFile != null && !releaseSigningReady) {
+    logger.warn(
+        "Release signing is incomplete or the keystore is missing " +
+            "(forexStoreFile='$releaseStoreFile'); building an UNSIGNED release APK."
+    )
+}
+
 android {
     namespace = "com.devcode940.ForexAnalyst"
     compileSdk = 34
@@ -17,6 +65,22 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // WHY declared before buildTypes: the Gradle DSL is evaluated top to bottom, so the
+    // release build type below must be able to look this config up by name.
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("release") {
+                // WHY requireNotNull instead of !!: releaseSigningReady has already proved
+                // all four are present, and requireNotNull says so in the failure message
+                // rather than throwing a bare NullPointerException into a build log.
+                storeFile = file(requireNotNull(releaseStoreFile) { "forexStoreFile" })
+                storePassword = requireNotNull(releaseStorePassword) { "forexStorePassword" }
+                keyAlias = requireNotNull(releaseKeyAlias) { "forexKeyAlias" }
+                keyPassword = requireNotNull(releaseKeyPassword) { "forexKeyPassword" }
+            }
+        }
+    }
+
     buildTypes {
         release {
             // WHY: Ship optimized + obfuscated in release — smaller APK and
@@ -27,6 +91,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // WHY conditional: see the signing block at the top of this file. Leaving this
+            // unset is what makes AGP emit app-release-unsigned.apk instead of failing the
+            // build for somebody who only wanted to inspect the shrunk output.
+            if (releaseSigningReady) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

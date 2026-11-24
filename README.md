@@ -292,6 +292,13 @@ Heikin-Ashi is a **display** transform: `chartState.candles` carries the smoothe
 * Release builds run R8 with `app/proguard-rules.pro` (Gson reflection keep rules included — without
   them obfuscation silently resets settings on every launch). Every persisted enum also pins its wire
   spelling with `@SerializedName`, and `ChartConfigTest` fails if one is renamed.
+* **Signing credentials never live in the repository.** `app/build.gradle.kts` reads the keystore path
+  and passwords from Gradle properties or environment variables; `*.jks`, `*.keystore`,
+  `keystore.properties` and `signing.properties` are gitignored, and CI decodes the keystore from a
+  secret into `$RUNNER_TEMP`, outside the checkout, so no uploaded artifact can contain it. A
+  committed signing key cannot be rotated without breaking every existing install.
+* The CI workflow runs with `permissions: contents: read` — it builds and uploads artifacts, and
+  cannot write to the repository it ran on.
 
 ## Accessibility
 
@@ -304,12 +311,92 @@ Heikin-Ashi is a **display** transform: `chartState.candles` carries the smoothe
 
 ## Build & test
 
+**Requires JDK 17.** `app/build.gradle.kts` pins `sourceCompatibility`, `targetCompatibility` and
+`jvmTarget` to 17, and AGP 8.2.0 refuses to run on JDK 11 — so 17 is both the floor and the target.
+There is no `jvmToolchain` block and no `org.gradle.java.home`, which means Gradle builds with
+whatever JVM launched it: in Android Studio set *Gradle JDK* to the embedded JetBrains Runtime 17,
+on the command line point `JAVA_HOME` at a Temurin 17. JDK 21 runs the build but changes nothing,
+since the bytecode target is still 17.
+
+`minSdk 26` / `compileSdk 34` are Android API levels, not Java versions. Because `minSdk` is 26, the
+`java.time` usage throughout the data layer needs no core-library desugaring.
+
 ```bash
-./gradlew :app:assembleDebug                 # build
+./gradlew :app:assembleDebug                 # -> app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:assembleRelease               # -> app-release.apk (signed) or app-release-unsigned.apk
 ./gradlew :app:testDebugUnitTest             # JVM unit tests (engine, chart maths, models, ViewModel)
 ./gradlew :app:connectedDebugAndroidTest     # Room integration test on a device/emulator
 ./gradlew :app:lintDebug                     # static analysis
 ```
+
+### Getting an APK without an Android toolchain
+
+`ci/build-apk.yml` builds on GitHub's runners — JDK 17 plus the preinstalled Android SDK — and
+publishes the result as a downloadable artifact, so nobody needs a local toolchain to hold the app.
+
+> **It is staged, not active.** GitHub only runs workflows under `.github/workflows/`, and the commit
+> that added this one was made with a GitHub App token that lacks the `workflows` permission — GitHub
+> rejected the push outright. The file is committed at `ci/build-apk.yml`, complete and reviewed, and
+> goes live with any one of:
+>
+> ```bash
+> git mv ci/build-apk.yml .github/workflows/build-apk.yml
+> git commit -m "Enable the APK build workflow" && git push
+> ```
+>
+> …or **Actions → New workflow → set up a workflow yourself**, paste the file's contents and commit
+> (the web UI commits as you, so the App permission never applies), …or grant the app
+> *Settings → GitHub Apps → Repository permissions → Workflows: Read and write*.
+
+Once active, run it from **Actions → Build APK → Run workflow** (it also runs on every push to `main`
+and every pull request), then download `ForexAnalyst-apks.zip` from the run page. The same run uploads:
+
+| Artifact | Contents | Why |
+|---|---|---|
+| `ForexAnalyst-apks` | debug and release `.apk` | the installable app |
+| `ForexAnalyst-release-mapping` | R8 `mapping.txt` | release builds are obfuscated, so a field crash trace is unreadable without the mapping from *that exact* build |
+| `ForexAnalyst-room-schemas` | exported `app/schemas/*.json` | the input `MigrationTestHelper` needs — see Known limitations |
+| `unit-test-report` | HTML test report | which assertion failed, without re-running anything |
+
+The APK build and the unit tests are **separate jobs** on purpose: a failing test must not withhold a
+downloadable APK, and a compile error in the test sources must not hide whether the app itself builds.
+The 27 instrumented tests are *not* run in CI — GitHub-hosted runners have no hardware acceleration,
+so a software emulator costs ten minutes to boot and fails for reasons unrelated to this code. They
+stay a local `connectedDebugAndroidTest` run.
+
+**Which APK installs:** the debug APK is signed with the throwaway debug keystore and installs on any
+device with sideloading enabled. The release APK installs **only** if signing is configured; otherwise
+AGP emits `app-release-unsigned.apk`, which the launcher refuses, and the workflow raises a visible
+warning annotation rather than letting you discover that on your phone.
+
+### Signing a release
+
+Credentials are read from Gradle properties or environment variables — never from the repository,
+because a committed keystore lets anyone who clones it publish an update under the same signature:
+
+| Gradle property (`~/.gradle/gradle.properties`) | Environment variable (CI secret) |
+|---|---|
+| `forexStoreFile` | `FOREX_STORE_FILE` |
+| `forexStorePassword` | `FOREX_STORE_PASSWORD` |
+| `forexKeyAlias` | `FOREX_KEY_ALIAS` |
+| `forexKeyPassword` | `FOREX_KEY_PASSWORD` |
+
+In CI the keystore itself is stored as `FOREX_KEYSTORE_BASE64` and decoded to `$RUNNER_TEMP`, outside
+the checkout, so no artifact glob can pick it up. With all four values present and the file existing,
+the release build type is signed; with any of them missing, the build logs a warning naming the
+missing property at *configuration* time and produces an unsigned APK — AGP's own failure for a bad
+keystore path arrives late inside `packageRelease` and reads like a code error.
+`*.jks`, `*.keystore`, `keystore.properties` and `signing.properties` are gitignored.
+
+### A note for AndroidIDE users
+
+`gradle.properties` deliberately does **not** set `android.aapt2FromMavenOverride`. It used to point at
+`/usr/bin/aapt2`, a path that exists only inside AndroidIDE; because a project-level property is read by
+every machine that opens the repository, Android Studio, the CLI and CI all failed during resource
+linking with *"Cannot run program /usr/bin/aapt2 … No such file or directory"* before Gradle reached a
+line of Kotlin. If you build on-device with AndroidIDE, put the override in your **user-level**
+`~/.gradle/gradle.properties`, where it applies to your machine only.
+
 
 **394 tests across 23 suites** (367 JVM unit tests in 22 suites, 27 instrumented in 1). The provider,
 budget, sanitizer, alert-evaluation and alert-monitor suites run on the JVM with no Android
@@ -397,4 +484,11 @@ production risk it removes.
   version 1 under `app/schemas/`, which only a real Gradle build produces (`room.schemaLocation` is
   already configured in `app/build.gradle.kts`); no build has been run in this environment, so the
   migration is not covered by an automated test yet. Fresh installs get the table from the generated
-  schema and are unaffected.
+  schema and are unaffected. The `Build APK` workflow now uploads whatever `app/schemas/` a real build
+  exports as the `ForexAnalyst-room-schemas` artifact — committing those JSON files is the last step
+  needed to switch the migration test on.
+* **Nothing in this repository has been compiled by the author of these notes.** The environment it was
+  written in has no JDK, Gradle or Android SDK, so the 394 tests are unexecuted and every Kotlin file is
+  unverified by `kotlinc`. The first CI run is the real review gate; the likeliest places to need a fix
+  are the Compose call sites in `SettingsScreen` / `AlertsScreen` and the two `runTest` polling
+  assertions in `AlertMonitorTest`.

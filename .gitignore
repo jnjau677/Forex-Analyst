@@ -10,3 +10,11 @@
 /captures
 .externalNativeBuild
 
+# WHY: a signing key committed to a repository lets anyone who clones it publish an update
+# to this app under the same signature, and the key cannot be rotated without breaking every
+# existing install. The credentials belong in ~/.gradle/gradle.properties (user level, outside
+# the repo) or in CI secrets - see the signing block at the top of app/build.gradle.kts.
+*.jks
+*.keystore
+keystore.properties
+signing.properties

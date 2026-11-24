@@ -15,6 +15,21 @@ provider routing, quota accounting, message redaction, alert evaluation and moni
 in milliseconds on a JVM. The only Android-bound piece is `AlertNotifier`, and `AlertMonitor`
 depends on the `AlertNotificationSink` interface instead of on it.
 
+That split is also what makes CI possible on a hosted runner. `ci/build-apk.yml` (staged at that path
+because GitHub only executes workflows under `.github/workflows/`, and the token that authored it
+lacked the `workflows` permission — move it there to activate it; the README has the three ways) runs
+two independent jobs: `unit-tests` (`:app:testDebugUnitTest`, the 367 JVM tests, plus the HTML report
+as an artifact) and `apk` (`:app:assembleDebug` and `:app:assembleRelease`, with the APKs, the R8
+mapping and the exported Room schemas uploaded). They are separate jobs rather than steps in one so
+that a failing test cannot withhold a downloadable APK, and a compile error in the test sources cannot
+hide whether the app itself builds.
+
+The instrumented layer stays local. GitHub-hosted runners have no KVM, so an ARM-emulated Android
+emulator takes ~10 minutes to boot and fails intermittently for reasons unrelated to this code; the
+27 tests in `ForexRepositoryIntegrationTest` run through `./gradlew :app:connectedDebugAndroidTest`
+against a real device or an accelerated emulator. A self-hosted runner with KVM, or
+`reactivecircus/android-emulator-runner` on a KVM-enabled host, would change that calculus.
+
 ## Why not Testcontainers here
 
 Testcontainers starts **server** databases (PostgreSQL, MySQL, MongoDB) in Docker and talks
