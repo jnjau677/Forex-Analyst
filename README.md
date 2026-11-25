@@ -311,6 +311,11 @@ Heikin-Ashi is a **display** transform: `chartState.candles` carries the smoothe
 
 ## Build & test
 
+> **Deploying?** [`docs/Deployment.md`](docs/Deployment.md) covers building on a phone (AndroidIDE /
+> Termux), signing, sideloading, Google Play, versioning, the release-build smoke test and rollback —
+> including the pre-flight blockers and the on-device Gradle failures that are not obvious from a
+> desktop.
+
 **Requires JDK 17.** `app/build.gradle.kts` pins `sourceCompatibility`, `targetCompatibility` and
 `jvmTarget` to 17, and AGP 8.2.0 refuses to run on JDK 11 — so 17 is both the floor and the target.
 There is no `jvmToolchain` block and no `org.gradle.java.home`, which means Gradle builds with
@@ -328,6 +333,34 @@ since the bytecode target is still 17.
 ./gradlew :app:connectedDebugAndroidTest     # Room integration test on a device/emulator
 ./gradlew :app:lintDebug                     # static analysis
 ```
+
+### Building on a phone (AndroidIDE, Termux)
+
+This project was first built in AndroidIDE, and on-device builds fail in ways a desktop never does.
+`docs/Deployment.md` §3 has the full list; the five that bite hardest:
+
+* **Use `./gradlew`, not a bare `gradle`.** The wrapper is committed and pinned to Gradle 8.13; a
+  `gradle` on `PATH` is a different version and often a different JVM. `gradle wrapper` only *creates*
+  a wrapper — this project already has one.
+* **Do not keep the project on `/storage/...`.** Shared storage is FUSE-emulated and does not honour
+  the executable bit, so `./gradlew` gives *Permission denied* even at mode `100755`, `chmod +x` does
+  not stick, and Gradle's daemon file locks misbehave. Use app-private storage (`~/project/…`), or
+  `sh gradlew …`, or let AndroidIDE drive the build.
+* **`foojay-resolver-convention` failures are not this project's.** `settings.gradle.kts` has no
+  `plugins {}` block and the word `foojay` appears nowhere here. A
+  *"Cannot choose between javadocElements and sourcesElements … Required org.gradle.jvm.version '8'"*
+  error means Gradle is running on **JDK 8** while evaluating some *other* project's settings script —
+  that plugin only exists to auto-provision JDKs, and this build has no `jvmToolchain` block, so it
+  does not need it.
+* **`FAIL_ON_PROJECT_REPOS` is deliberate.** A `repositories { … }` block in a module's
+  `build.gradle.kts` fails the build on purpose; repositories are declared once in
+  `settings.gradle.kts`. Delete the module-level block rather than relaxing the mode.
+* **`android.aapt2FromMavenOverride` is not in `gradle.properties`, on purpose.** It used to point at
+  `/usr/bin/aapt2`, a path that exists only inside AndroidIDE; because a *project-level* property is
+  read by every machine that opens the repository, any build outside AndroidIDE — Android Studio, the
+  CLI, CI — dies during resource linking with *"Cannot run program /usr/bin/aapt2 … No such file or
+  directory"* before Gradle reaches a line of Kotlin. Put it in your **user-level**
+  `~/.gradle/gradle.properties`, where it applies to your machine only.
 
 ### Getting an APK without an Android toolchain
 
@@ -387,16 +420,6 @@ the release build type is signed; with any of them missing, the build logs a war
 missing property at *configuration* time and produces an unsigned APK — AGP's own failure for a bad
 keystore path arrives late inside `packageRelease` and reads like a code error.
 `*.jks`, `*.keystore`, `keystore.properties` and `signing.properties` are gitignored.
-
-### A note for AndroidIDE users
-
-`gradle.properties` deliberately does **not** set `android.aapt2FromMavenOverride`. It used to point at
-`/usr/bin/aapt2`, a path that exists only inside AndroidIDE; because a project-level property is read by
-every machine that opens the repository, Android Studio, the CLI and CI all failed during resource
-linking with *"Cannot run program /usr/bin/aapt2 … No such file or directory"* before Gradle reached a
-line of Kotlin. If you build on-device with AndroidIDE, put the override in your **user-level**
-`~/.gradle/gradle.properties`, where it applies to your machine only.
-
 
 **394 tests across 23 suites** (367 JVM unit tests in 22 suites, 27 instrumented in 1). The provider,
 budget, sanitizer, alert-evaluation and alert-monitor suites run on the JVM with no Android
@@ -461,8 +484,14 @@ production risk it removes.
   (pair, timeframe) live in a `ConcurrentHashMap`, so a process restart labels a still-valid cache
   hit `UNKNOWN` until the next fetch. Cached rows in SQLite carry no provider column — adding one is
   another migration this environment cannot test.
-* **No notification silhouette icon.** The module has only `res/drawable/ic_launcher.xml`, so
-  `AlertNotifier` uses it as the small icon; on some launchers that renders as a white square in the
+* **No adaptive launcher icon.** `res/` holds only `drawable/ic_launcher.xml`, a 108dp `<vector>`, with
+  no `mipmap-anydpi-v26` wrapper and no bitmap mipmaps. API 26+ launchers therefore treat it as a
+  *legacy* icon and letterbox it inside a generated shim, so it looks wrong next to every other app —
+  and Google Play needs a 512×512 PNG for the listing regardless. The vector is already drawn on the
+  108×108 adaptive canvas, so splitting it into background and foreground layers is a small mechanical
+  fix; see `docs/Deployment.md` §1.2.
+* **No notification silhouette icon.** For the same reason `AlertNotifier` uses
+  `R.drawable.ic_launcher` as the small icon; on some launchers that renders as a white square in the
   status bar. A monochrome `ic_stat_alert` is a one-file fix that needs a design asset.
 * **Alpha Vantage cannot serve H4 or W1.** Its free FX endpoints are intraday (1/5/15/30/60 min) and
   daily only, so `TimeframeMapper.intervalFor` returns null and the client reports
